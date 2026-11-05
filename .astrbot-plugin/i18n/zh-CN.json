@@ -1,7 +1,8 @@
 {
   "metadata": {
     "display_name": "OpenAI Image API生图",
-    "desc": "一个极简、易用通过OpenAI Image API为agent提供OpenAI最新图像生成能力。系统提示词极简，图像生成记录持久保存，并提供合理且可由agent调整的默认参数。支持gpt-image-2.6-sunburst和gpt-image-2.6-flare"
+    "short_desc": "让agent通过OpenAI Image API生成WebP",
+    "desc": "一个极简、易用的，为agent提供的OpenAI Image API图像生成工具。系统提示词极简，图像生成记录持久保存，并提供合理且可由agent调整的默认参数。支持gpt-image-2.6-sunburst和gpt-image-2.6-flare"
   },
   "config": {
     "api_key": {
