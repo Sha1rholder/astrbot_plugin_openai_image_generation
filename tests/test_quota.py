@@ -30,10 +30,10 @@ def add_history(plugin, timestamp, count: int | None = 1, user_id="123456"):
 @pytest.mark.asyncio
 async def test_quota_counts_images_and_rejection_does_not_record(quota_plugin, event):
     plugin = quota_plugin
-    add_history(plugin, NOW - 1, count=4)
+    add_history(plugin, NOW - 1, count=2)
     original_log = (plugin.requests_dir / "123456.log").read_bytes()
     result = await plugin.generate(event, {**ARGUMENTS, "number_of_images": 2})
-    assert "4/5 images used" in result
+    assert "2/3 images used" in result
     assert "only 1 remain" in result
     assert "No image task was queued" in result
     assert (plugin.requests_dir / "123456.log").read_bytes() == original_log
@@ -42,7 +42,7 @@ async def test_quota_counts_images_and_rejection_does_not_record(quota_plugin, e
     # Exactly reaching the quota is permitted.
     assert "queued in the background" in await plugin.generate(event, ARGUMENTS)
     await asyncio.gather(*plugin._tasks)
-    assert "5/5 images used" in await plugin.generate(event, ARGUMENTS)
+    assert "3/3 images used" in await plugin.generate(event, ARGUMENTS)
     plugin.api.generate.assert_awaited_once()
 
 
@@ -52,10 +52,10 @@ async def test_default_window_boundary_and_expired_missing_yaml(quota_plugin, ev
     # Exactly 360 minutes old is outside the window and needs no YAML read.
     expired = add_history(plugin, NOW - 360 * 60, count=5)
     (expired / "request.yaml").unlink()
-    add_history(plugin, NOW - 360 * 60 + 1, count=4)
+    add_history(plugin, NOW - 360 * 60 + 1, count=2)
     assert "queued in the background" in await plugin.generate(event, ARGUMENTS)
     await asyncio.gather(*plugin._tasks)
-    assert "5/5 images used" in await plugin.generate(event, ARGUMENTS)
+    assert "3/3 images used" in await plugin.generate(event, ARGUMENTS)
 
 
 @pytest.mark.asyncio
@@ -84,7 +84,7 @@ async def test_omitted_and_null_counts_each_use_one_image(quota_plugin, event):
 @pytest.mark.asyncio
 async def test_user_quota_is_shared_across_conversations_but_not_users(quota_plugin, event):
     plugin = quota_plugin
-    add_history(plugin, NOW, count=5)
+    add_history(plugin, NOW, count=3)
     event.unified_msg_origin = "webchat:GroupMessage:another-group"
     assert "limit exceeded" in await plugin.generate(event, ARGUMENTS)
     event.get_sender_id.return_value = "another-user"
@@ -119,10 +119,10 @@ async def test_concurrent_calls_reserve_quota_before_background_success(quota_pl
 @pytest.mark.asyncio
 async def test_restart_reads_persisted_history(quota_plugin, event):
     plugin = quota_plugin
-    add_history(plugin, NOW, count=5)
+    add_history(plugin, NOW, count=3)
     restarted = plugin_module.WebpImagePlugin(plugin.context, dict(plugin.api.config))
     try:
-        assert "5/5 images used" in await restarted.generate(event, ARGUMENTS)
+        assert "3/3 images used" in await restarted.generate(event, ARGUMENTS)
         assert not restarted._tasks
     finally:
         await restarted.terminate()
@@ -203,7 +203,7 @@ async def test_incomplete_history_does_not_silently_bypass_quota(quota_plugin, e
 def test_config_ui_defaults_match_runtime_defaults():
     schema = json.loads((ROOT / "_conf_schema.json").read_text())
     assert schema["user_window_minutes"]["default"] == 360
-    assert schema["user_max_images"]["default"] == 5
+    assert schema["user_max_images"]["default"] == 3
     assert schema["user_window_minutes"]["type"] == "int"
     assert schema["user_max_images"]["type"] == "int"
 

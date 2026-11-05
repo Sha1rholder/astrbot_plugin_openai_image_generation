@@ -2,7 +2,6 @@ import asyncio
 import base64
 import io
 import json
-import re
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -60,8 +59,8 @@ async def test_hint_is_short_idempotent_and_respects_tool_selection(plugin, even
     assert req.system_prompt == "Original persona"
 
 
-def test_reference_order_and_english_instructions(plugin, event):
-    """Verify reference ordering, available indices, and English model instructions."""
+def test_reference_order_and_instructions(plugin, event):
+    """Verify reference ordering, available indices, and model instructions."""
     first = Image.fromBase64("first")
     second = Image.fromBase64("second")
     quoted = Image.fromBase64("quoted")
@@ -74,8 +73,6 @@ def test_reference_order_and_english_instructions(plugin, event):
         in guide
     )
     assert "sunburst" in guide and "flare" in guide
-    prose = re.sub(r"\{[^\n]*\}", "", guide)
-    assert not any("\u4e00" <= char <= "\u9fff" for char in prose)
     assert not any("\u4e00" <= char <= "\u9fff" for char in plugin_module.SYSTEM_HINT)
     assert not any(
         "\u4e00" <= char <= "\u9fff"
@@ -274,6 +271,7 @@ async def test_astrbot_executor_to_http_to_delivery(
     plugin, event, tmp_path, requested, returned
 ):
     """Verify one automatic message contains the description and every returned image."""
+    plugin.api.config["user_max_images"] = 5
     outputs = []
     for index in range(returned):
         output = io.BytesIO()

@@ -314,7 +314,7 @@ class WebpImagePlugin(Star):
         self, log_path: Path, user_id: str, requested: int, now: int
     ) -> None:
         """Read persisted receipts and YAML counts before accepting another request."""
-        window_minutes, maximum = self._quota_settings("user", 5)
+        window_minutes, maximum = self._quota_settings("user", 3)
         if window_minutes == 0:
             return
         cutoff = now - window_minutes * 60
