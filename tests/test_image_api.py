@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import json
@@ -285,6 +286,99 @@ async def test_invalid_client_config_prevents_request(api, tmp_path, key, value)
         await api.generate(payload, [], tmp_path, ARGUMENTS)
     assert "secret" not in str(error.value)
     assert api.client is None
+
+
+@pytest.mark.parametrize("value", [None, "", " \t"])
+def test_empty_proxy_preserves_environment_settings(api, value):
+    api.config["proxy"] = value
+    assert api.proxy_url() is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ftp://user:private-password@localhost:1080",
+        "localhost:1080",
+        "socks5h://",
+        "http://localhost:invalid",
+        "http://localhost:65536",
+        "http://localhost:0",
+        "http://localhost/path",
+        "http://localhost?password=private-password",
+        "http://localhost#private-password",
+        123,
+    ],
+)
+def test_invalid_proxy_does_not_leak_credentials(api, value):
+    api.config["proxy"] = value
+    with pytest.raises(ImageGenerationError, match="proxy") as error:
+        api.proxy_url()
+    assert "private-password" not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
+@pytest.mark.parametrize("with_reference", [False, True])
+async def test_requests_use_authenticated_proxy(
+    api, tmp_path, monkeypatch, webp, scheme, with_reference
+):
+    """Exercise real proxy handshakes without external network or API calls."""
+    loop = asyncio.get_running_loop()
+    received = loop.create_future()
+
+    async def handle(reader, writer):
+        try:
+            if scheme.startswith("socks"):
+                assert await reader.readexactly(3) == b"\x05\x01\x02"
+                writer.write(b"\x05\x02")
+                await writer.drain()
+                assert await reader.readexactly(2) == b"\x01\x04"
+                assert await reader.readexactly(4) == b"user"
+                length = (await reader.readexactly(1))[0]
+                assert await reader.readexactly(length) == b"pass@word"
+                writer.write(b"\x01\x00")
+                await writer.drain()
+                assert await reader.readexactly(4) == b"\x05\x01\x00\x03"
+                length = (await reader.readexactly(1))[0]
+                assert await reader.readexactly(length) == b"image-api.invalid"
+                assert await reader.readexactly(2) == b"\x00\x50"
+                writer.write(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x50")
+                await writer.drain()
+            headers = await reader.readuntil(b"\r\n\r\n")
+            if scheme == "http":
+                auth = base64.b64encode(b"user:pass@word")
+                assert b"Proxy-Authorization: Basic " + auth in headers
+            else:
+                assert b"Proxy-Authorization" not in headers
+            endpoint = b"images/edits" if with_reference else b"images/generations"
+            assert endpoint in headers.split(b"\r\n")[0]
+            writer.write(
+                b"HTTP/1.1 500 Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            await writer.drain()
+            received.set_result(None)
+        except Exception as exc:
+            received.set_exception(exc)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async with await asyncio.start_server(handle, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setenv("NO_PROXY", "*")
+        api.config.update(
+            api_key="test-key",
+            base_url="http://image-api.invalid/v1",
+            proxy=f" {scheme}://user:pass%40word@127.0.0.1:{port} ",
+        )
+        payload, _ = api.prepare(ARGUMENTS)
+        references = [base64.b64encode(webp).decode()] if with_reference else []
+        with pytest.raises(ImageGenerationError, match="HTTP 500"):
+            await asyncio.wait_for(
+                api.generate(payload, references, tmp_path / "out", ARGUMENTS), 5
+            )
+        await asyncio.wait_for(received, 5)
 
 
 @pytest.mark.parametrize("limit", [0, True, "10"])

@@ -12,6 +12,13 @@
 		"default": "https://api.openai.com/v1",
 		"hint": "Include /v1, not /images/generations. Reference images require JSON support for /images/edits."
 	},
+	"proxy": {
+		"description": "Image API proxy",
+		"type": "string",
+		"secret": true,
+		"default": "",
+		"hint": "Optional HTTP(S), SOCKS5 or SOCKS5h proxy URL, e.g. http://127.0.0.1:7890 or socks5h://user:password@127.0.0.1:1080. Overrides environment proxies when set; leave empty to keep environment proxy settings. Both SOCKS schemes resolve target domains at the proxy. Applies to generation and edit API requests. Reload the plugin after changes."
+	},
 	"timeout_seconds": {
 		"description": "API request timeout in seconds",
 		"type": "int",

@@ -40,6 +40,32 @@ class ImageAPI:
         self.plugin_dir = plugin_dir
         self.client: httpx.AsyncClient | None = None
 
+    def proxy_url(self) -> httpx.URL | None:
+        """Validate the optional proxy without exposing credentials in errors."""
+        value = self.config.get("proxy")
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            if not isinstance(value, str):
+                raise ValueError
+            url = httpx.URL(value.strip())
+            if (
+                url.scheme not in ("http", "https", "socks5", "socks5h")
+                or not url.host
+                or url.path not in ("", "/")
+                or url.query
+                or url.fragment
+                or (url.port is not None and not 1 <= url.port <= 65535)
+            ):
+                raise ValueError
+        except (httpx.InvalidURL, ValueError):
+            raise ImageGenerationError(
+                "proxy must be an HTTP(S), SOCKS5 or SOCKS5h proxy URL, "
+                "such as http://127.0.0.1:7890 or socks5h://user:password@127.0.0.1:1080. "
+                "Leave it empty to use environment proxy settings."
+            ) from None
+        return url
+
     def require_api_key(self) -> str:
         """Resolve configured credentials or return an actionable error to the agent."""
         api_key = (
@@ -232,6 +258,7 @@ class ImageAPI:
                     "timeout_seconds must be a positive, finite number of seconds."
                 ) from None
             self.client = httpx.AsyncClient(
+                proxy=self.proxy_url(),
                 base_url=base_url + "/",
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=httpx.Timeout(timeout, connect=30),
