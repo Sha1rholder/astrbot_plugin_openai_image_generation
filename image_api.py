@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -118,11 +119,11 @@ class ImageAPI:
         return payload, [int(index) for index in arguments["prompt"].get("images", [])]
 
     def storage_limit(self) -> int:
-        """Validate retention settings before requesting images."""
-        limit = self.config.get("max_saved_requests", 10)
-        if type(limit) is not int or limit < 1:
-            raise ImageGenerationError("max_saved_requests must be a positive integer.")
-        return limit
+        """Return the configured storage limit in bytes (decimal GB)."""
+        limit = self.config.get("max_storage_gb", 10)
+        if type(limit) is not int or limit <= 0:
+            raise ImageGenerationError("max_storage_gb must be a positive integer.")
+        return limit * 1_000_000_000
 
     @staticmethod
     def next_request_id(output_dir: Path) -> int:
@@ -236,6 +237,11 @@ class ImageAPI:
         if references:
             endpoint = "images/edits"
             body["images"] = await asyncio.to_thread(self.reference_payload, references)
+        # Generation and delivery are serialized by the plugin. Keep this request
+        # and all later queued archives; only earlier requests can be removed.
+        await asyncio.to_thread(
+            self.prune_requests, output_dir, limit, int(request_dir.name)
+        )
         response = await self.client.post(endpoint, json=body)
         if not response.is_success:
             explanation = {
@@ -256,11 +262,6 @@ class ImageAPI:
             ) from None
         paths = await asyncio.to_thread(
             self.save_images, result, request_dir, payload["n"]
-        )
-        # Creation never prunes: older requests may still be generating or sending.
-        # The plugin serializes generation and delivery before reaching this point.
-        await asyncio.to_thread(
-            self.prune_requests, output_dir, int(request_dir.name) - limit
         )
         return paths
 
@@ -372,20 +373,49 @@ class ImageAPI:
             return paths
 
     @staticmethod
-    def prune_requests(output_dir: Path, cutoff: int) -> None:
-        """Delete canonical numeric request directories at or below the cutoff."""
+    def storage_size(directory: Path) -> int:
+        """Sum regular file bytes recursively without following symbolic links."""
+        total = 0
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    total += ImageAPI.storage_size(Path(entry.path))
+                elif stat.S_ISREG(info.st_mode):
+                    total += info.st_size
+        return total
+
+    @staticmethod
+    def prune_requests(output_dir: Path, limit: int, current_id: int) -> None:
+        """On overflow, remove oldest completed archives until below the limit."""
         with STORAGE_LOCK:
-            for directory in output_dir.iterdir():
-                name = directory.name
-                if (
-                    name.isascii()
-                    and name.isdecimal()
-                    and str(int(name)) == name
-                    and int(name) <= cutoff
+            total = ImageAPI.storage_size(output_dir)
+            if total <= limit:
+                return
+            directories = sorted(
+                (
+                    directory
+                    for directory in output_dir.iterdir()
+                    if directory.name.isascii()
+                    and directory.name.isdecimal()
+                    and str(int(directory.name)) == directory.name
+                    and int(directory.name) < current_id
                     and not directory.is_symlink()
                     and directory.is_dir()
-                ):
-                    shutil.rmtree(directory)
+                ),
+                key=lambda directory: int(directory.name),
+            )
+            for directory in directories:
+                size = ImageAPI.storage_size(directory)
+                shutil.rmtree(directory)
+                total -= size
+                if total < limit:
+                    return
+            raise ImageGenerationError(
+                "Image archive storage cannot be reduced below max_storage_gb without "
+                "deleting current or queued requests or unrelated files. Increase the limit "
+                "or free space in the image archive directory. No Image API request was made."
+            )
 
     async def close(self) -> None:
         """Close an existing HTTP client and clear it so repeated cleanup is safe."""

@@ -419,18 +419,18 @@ def test_description_required():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("limit", [0, -1, True, "10", None, 1.5])
+@pytest.mark.parametrize("limit", [0, -1, True, "10", None, 1.5, 1.0, float("inf"), float("nan")])
 async def test_invalid_retention_prevents_request(api, tmp_path, limit):
-    api.config["max_saved_requests"] = limit
+    api.config["max_storage_gb"] = limit
     arguments = {"prompt": {"text": "cat"}, "description": "A cat"}
     payload, _ = api.prepare(arguments)
-    with pytest.raises(ImageGenerationError, match="max_saved_requests"):
+    with pytest.raises(ImageGenerationError, match="max_storage_gb"):
         await api.generate(payload, [], tmp_path, arguments)
     assert api.client is None
 
 
 @pytest.mark.asyncio
-async def test_request_archive_and_numeric_retention(api, tmp_path, webp):
+async def test_request_archive_and_capacity_retention(api, tmp_path, webp, monkeypatch):
     import shutil
 
     arguments = {
@@ -464,10 +464,11 @@ async def test_request_archive_and_numeric_retention(api, tmp_path, webp):
             "request": arguments,
         }
     assert {p.name for p in output.iterdir() if p.is_dir()} == {
-        str(i) for i in range(2, 12)
+        str(i) for i in range(12)
     }
-    # Reducing the limit cleans all directories below the numeric cutoff.
-    api.config["max_saved_requests"] = 1
+    # Reducing the limit cleans old archives before the next HTTP request.
+    archive_size = (output / "11" / "request.yaml").stat().st_size
+    monkeypatch.setattr(api, "storage_limit", lambda: archive_size + 1)
     paths = await api.generate(payload, [], output, arguments)
     assert paths[0].parent.name == "12"
     assert {p.name for p in output.iterdir() if p.is_dir()} == {"12"}
@@ -536,7 +537,8 @@ def test_cleanup_ignores_unrelated_files_and_symlinks(tmp_path):
     for name in ["1", "2", "02", "old-uuid"]:
         (output / name).mkdir()
     (output / "old.webp").write_text("keep")
-    ImageAPI.prune_requests(output, 1)
+    (output / "1" / "large").write_bytes(b"x" * 100)
+    ImageAPI.prune_requests(output, 10, 2)
     assert not (output / "1").exists()
     assert (outside / "keep").read_text() == "keep"
     assert {p.name for p in output.iterdir()} == {
@@ -614,3 +616,70 @@ def test_archive_schema_explains_tool_arguments_and_rejects_api_payload():
             },
             api_module.REQUEST_SCHEMA,
         )
+
+
+@pytest.mark.parametrize("limit,remaining", [(100, {"0", "2", "10"}), (99, {"2", "10"}), (60, {"10"})])
+def test_capacity_cleanup_order_and_boundary(tmp_path, limit, remaining):
+    for name, size in [("10", 30), ("2", 30), ("0", 40)]:
+        directory = tmp_path / name / "nested"
+        directory.mkdir(parents=True)
+        (directory / "image.webp").write_bytes(b"x" * size)
+    ImageAPI.prune_requests(tmp_path, limit, 11)
+    assert {p.name for p in tmp_path.iterdir()} == remaining
+
+
+@pytest.mark.asyncio
+async def test_cleanup_precedes_http_and_keeps_current_and_queued(api, tmp_path, monkeypatch):
+    arguments = {"prompt": {"text": "cat"}, "description": "cat"}
+    output = tmp_path / "images"
+    old = api.create_request(output, arguments)
+    (old / "large.webp").write_bytes(b"x" * 10000)
+    current = api.create_request(output, arguments)
+    queued = api.create_request(output, arguments)
+    monkeypatch.setattr(api, "storage_limit", lambda: ImageAPI.storage_size(current) * 2 + 1)
+    calls = []
+
+    def respond(request):
+        assert not old.exists()
+        assert (current / "request.yaml").exists()
+        assert (queued / "request.yaml").exists()
+        calls.append(request)
+        return httpx.Response(500)
+
+    api.client = httpx.AsyncClient(base_url="https://example.invalid/v1/", transport=httpx.MockTransport(respond))
+    payload, _ = api.prepare(arguments)
+    try:
+        with pytest.raises(ImageGenerationError, match="HTTP 500"):
+            await api.generate(payload, [], output, arguments, current)
+        assert len(calls) == 1
+        monkeypatch.setattr(api, "storage_limit", lambda: 1)
+        with pytest.raises(ImageGenerationError, match="No Image API request"):
+            await api.generate(payload, [], output, arguments, current)
+        assert len(calls) == 1
+        assert current.exists() and queued.exists()
+    finally:
+        await api.close()
+
+
+def test_cleanup_failure_prevents_deletion_continuation(tmp_path, monkeypatch):
+    directory = tmp_path / "0"
+    directory.mkdir()
+    (directory / "image").write_bytes(b"xx")
+
+    def fail(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(api_module.shutil, "rmtree", fail)
+    with pytest.raises(PermissionError):
+        ImageAPI.prune_requests(tmp_path, 1, 1)
+    assert directory.exists()
+
+
+def test_storage_limit_defaults_to_ten_gb(api):
+    assert api.storage_limit() == 10_000_000_000
+
+
+@pytest.mark.parametrize("limit", [1, 10, 25])
+def test_storage_limit_accepts_positive_integers(api, limit):
+    api.config["max_storage_gb"] = limit
+    assert api.storage_limit() == limit * 1_000_000_000

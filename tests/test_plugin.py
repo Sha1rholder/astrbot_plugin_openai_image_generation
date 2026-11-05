@@ -349,7 +349,7 @@ async def test_astrbot_executor_to_http_to_delivery(
 
 
 @pytest.mark.asyncio
-async def test_retention_waits_for_delivery(plugin, event):
+async def test_retention_waits_for_delivery(plugin, event, monkeypatch):
     """A second request must not prune files still being delivered by the first."""
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -361,7 +361,6 @@ async def test_retention_waits_for_delivery(plugin, event):
         return await original_send(origin, result)
 
     plugin.context.send_message = slow_send
-    plugin.api.config["max_saved_requests"] = 1
     output = io.BytesIO()
     PILImage.new("RGB", (16, 16), "blue").save(output, "WEBP")
     encoded = base64.b64encode(output.getvalue()).decode()
@@ -375,6 +374,8 @@ async def test_retention_waits_for_delivery(plugin, event):
     await plugin.generate(event, arguments)
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
+        archive_size = (plugin.output_dir / "0" / "request.yaml").stat().st_size
+        monkeypatch.setattr(plugin.api, "storage_limit", lambda: archive_size + 1)
         result = await plugin.generate(event, arguments)
         assert "queued in the background" in result
         await asyncio.sleep(0)
