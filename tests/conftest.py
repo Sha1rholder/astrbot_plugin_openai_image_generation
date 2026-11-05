@@ -41,6 +41,7 @@ def plugin(tmp_path, monkeypatch):
 def event():
     """Create a mock message event with empty attachments and transparent result builders."""
     message_event = create_autospec(plugin_module.AstrMessageEvent, instance=True)
+    message_event.get_sender_id.return_value = "123456"
     message_event.get_messages.return_value = []
     message_event.get_platform_name.return_value = "webchat"
     message_event.unified_msg_origin = "webchat:FriendMessage:test-session"

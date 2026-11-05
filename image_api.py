@@ -140,7 +140,9 @@ class ImageAPI:
         )
         return max(existing, default=-1) + 1
 
-    def create_request(self, output_dir: Path, arguments: dict[str, Any]) -> Path:
+    def create_request(
+        self, output_dir: Path, arguments: dict[str, Any], *, user_id: str | None = None
+    ) -> Path:
         """Reserve a numbered directory and archive arguments before enqueueing."""
         arguments = deepcopy(arguments)
         self.prepare(arguments)
@@ -156,6 +158,9 @@ class ImageAPI:
             raise ImageGenerationError(
                 "Cannot read the plugin version from metadata.yaml. No Image API request was made."
             ) from None
+        archive = {"plugin_version": version, "request": arguments}
+        if user_id is not None:
+            archive["user_id"] = user_id
         with STORAGE_LOCK:
             output_dir.mkdir(parents=True, exist_ok=True)
             directory = output_dir / str(self.next_request_id(output_dir))
@@ -168,7 +173,7 @@ class ImageAPI:
                 (staging / "request.yaml").write_text(
                     f"# yaml-language-server: $schema={REQUEST_SCHEMA['$id']}\n"
                     + yaml.safe_dump(
-                        {"plugin_version": version, "request": arguments},
+                        archive,
                         allow_unicode=True,
                         sort_keys=False,
                     ),

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -79,6 +81,7 @@ class WebpImagePlugin(Star):
         self._stopping = False
         self.api = ImageAPI(config, Path(__file__).parent)
         self.output_dir = StarTools.get_data_dir(PLUGIN_NAME) / "images"
+        self.requests_dir = self.output_dir.parent / "requests"
         self.context.add_llm_tools(ImageInstructionsTool(self), GenerateWebpTool(self))
 
     @staticmethod
@@ -149,14 +152,10 @@ class WebpImagePlugin(Star):
             return "The image plugin is shutting down. No image task was queued."
         arguments = deepcopy(arguments)
         try:
-            self.api.require_api_key()
             payload, indices = self.api.prepare(arguments)
         except ImageGenerationError as exc:
             return str(exc)
         references = self.reference_images(event)
-        if any(index > len(references) for index in indices):
-            return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
-        selected = [(index, references[index - 1]) for index in indices]
         origin = event.unified_msg_origin
         # Keep reservation order and background execution order identical so later
         # requests cannot prune an earlier request that has not run yet.
@@ -165,7 +164,7 @@ class WebpImagePlugin(Star):
                 return "The image plugin is shutting down. No image task was queued."
             try:
                 request_dir = await asyncio.to_thread(
-                    self.api.create_request, self.output_dir, arguments
+                    self._record_request, arguments, event.get_sender_id()
                 )
             except ImageGenerationError as exc:
                 return str(exc)
@@ -179,6 +178,13 @@ class WebpImagePlugin(Star):
                 )
             if self._stopping:
                 return "The image plugin is shutting down. No image task was queued."
+            try:
+                self.api.require_api_key()
+            except ImageGenerationError as exc:
+                return str(exc)
+            if any(index > len(references) for index in indices):
+                return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
+            selected = [(index, references[index - 1]) for index in indices]
             task = asyncio.create_task(
                 self._run_generation(
                     event, arguments, payload, selected, origin, request_dir
@@ -192,6 +198,21 @@ class WebpImagePlugin(Star):
             "automatically to this conversation when ready, or a failure notification if generation fails. "
             "The images have not been generated or delivered yet."
         )
+
+    def _record_request(self, arguments: dict[str, Any], user_id: str) -> Path:
+        """Archive a parsed request and append its receipt before any API work."""
+        if not user_id:
+            raise ImageGenerationError(
+                "Cannot identify the message sender. No image task was queued."
+            )
+        requested_at = int(time.time())
+        request_dir = self.api.create_request(self.output_dir, arguments, user_id=user_id)
+        self.requests_dir.mkdir(parents=True, exist_ok=True)
+        # Escape separators and control characters without changing ordinary IDs.
+        log_path = self.requests_dir / f"{quote(user_id, safe='')}.log"
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"{requested_at}\t{request_dir.name}\n")
+        return request_dir
 
     async def _run_generation(
         self,
