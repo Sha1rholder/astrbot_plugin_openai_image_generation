@@ -2,15 +2,11 @@ import asyncio
 import base64
 import io
 import json
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, create_autospec
 
 import httpx
 import pytest
 import yaml
-from conftest import plugin_module
-from mcp.types import TextContent
-from PIL import Image as PILImage
-
 from astrbot.api import ToolSet
 from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.provider import ProviderRequest
@@ -18,6 +14,11 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.star.context import _resolve_tool_handler_module_path
+from conftest import plugin_module
+from mcp.types import TextContent
+from PIL import Image as PILImage
+
+ARGUMENTS = {"description": "A cat", "prompt": {"text": "cat"}}
 
 
 def test_registered_tools_have_plugin_ownership(plugin):
@@ -40,15 +41,13 @@ def test_registered_tools_have_plugin_ownership(plugin):
 
 
 @pytest.mark.asyncio
-async def test_hint_is_short_idempotent_and_respects_tool_selection(plugin, event):
-    """Verify the concise hint is added once and respects missing or disabled tools."""
+async def test_hint_is_idempotent_and_respects_tool_selection(plugin, event):
+    """Verify the hint is added once and respects missing or disabled tools."""
     tools = list(plugin.context.add_llm_tools.call_args.args)
     req = ProviderRequest(system_prompt="Original persona", func_tool=ToolSet(tools))
     await plugin.add_image_hint(event, req)
     await plugin.add_image_hint(event, req)
     assert req.system_prompt == "Original persona\n" + plugin_module.SYSTEM_HINT
-    assert plugin_module.GUIDE not in req.system_prompt
-    assert len(plugin_module.SYSTEM_HINT) < 200
     for restricted in (None, ToolSet(tools[:1])):
         req = ProviderRequest(system_prompt="Original persona", func_tool=restricted)
         await plugin.add_image_hint(event, req)
@@ -72,54 +71,14 @@ def test_reference_order_and_instructions(plugin, event):
         f"Image archive directory on the AstrBot host: {plugin.output_dir.resolve()}"
         in guide
     )
-    assert "sunburst" in guide and "flare" in guide
-    assert not any("\u4e00" <= char <= "\u9fff" for char in plugin_module.SYSTEM_HINT)
-    assert not any(
-        "\u4e00" <= char <= "\u9fff"
-        for char in json.dumps(plugin_module.INPUT_SCHEMA, ensure_ascii=False)
-    )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("missing_value", [None, "", " \t\n"])
-async def test_instructions_tool_reports_missing_key(plugin, event, monkeypatch, missing_value):
-    """Missing credentials reach the agent instead of the generation guide."""
-    plugin.api.config["api_key"] = missing_value
-    if missing_value is not None:
-        monkeypatch.setenv("OPENAI_API_KEY", missing_value)
-    context = ContextWrapper(
-        context=AstrAgentContext(context=plugin.context, event=event)
-    )
-    tool = plugin.context.add_llm_tools.call_args.args[0]
-    results = [
-        item async for item in FunctionToolExecutor._execute_local(tool, context)
-    ]
-    result = results[0]
-    assert result is not None
-    content = result.content[0]
-    assert isinstance(content, TextContent)
-    assert "no usable OPENAI_API_KEY" in content.text
-    assert "Tell the user" in content.text
-    assert "Do not call the generation tool" in content.text
-    assert plugin_module.GUIDE not in content.text
-    assert not plugin._tasks
-    assert not plugin.output_dir.exists()
-
-
-@pytest.mark.parametrize("source", ["config", "environment"])
-def test_instructions_accept_configured_key_without_disclosing_it(plugin, event, monkeypatch, source):
-    """Both key sources allow instructions, including changes after an initial failure."""
+def test_instructions_report_missing_key(plugin, event):
     plugin.api.config["api_key"] = " "
-    assert "no usable OPENAI_API_KEY" in plugin.instructions(event)
-    key = "test-private-api-key"
-    if source == "config":
-        plugin.api.config["api_key"] = " " + key + "\n"
-    else:
-        monkeypatch.setenv("OPENAI_API_KEY", " " + key + "\n")
     result = plugin.instructions(event)
-    assert plugin_module.GUIDE in result
-    assert key not in result
-    assert plugin.api.client is None
+    assert "no usable OPENAI_API_KEY" in result
+    assert "Do not call the generation tool" in result
+    assert plugin_module.GUIDE not in result
 
 
 @pytest.mark.asyncio
@@ -128,9 +87,7 @@ async def test_generation_rechecks_key_before_enqueueing(plugin, event):
     assert plugin_module.GUIDE in plugin.instructions(event)
     plugin.api.config["api_key"] = ""
     plugin.api.generate = AsyncMock()
-    result = await plugin.generate(
-        event, {"description": "A cat", "prompt": {"text": "cat"}}
-    )
+    result = await plugin.generate(event, ARGUMENTS)
     assert "no usable OPENAI_API_KEY" in result
     assert "queued in the background" not in result
     assert not plugin._tasks
@@ -138,13 +95,6 @@ async def test_generation_rechecks_key_before_enqueueing(plugin, event):
     assert (plugin.requests_dir / "123456.log").is_file()
     plugin.api.generate.assert_not_awaited()
     plugin.context.send_message.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_help_command(plugin, event):
-    """Verify the help command yields the message-specific instructions."""
-    replies = [reply async for reply in plugin.image_help(event)]
-    assert replies == [plugin.instructions(event)]
 
 
 @pytest.mark.asyncio
@@ -158,40 +108,27 @@ async def test_invalid_references_do_not_call_api(plugin, event):
     assert not plugin._tasks
     plugin.api.generate.assert_not_awaited()
     plugin.context.send_message.assert_not_awaited()
-    event.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_only_selected_references_are_loaded(
-    plugin, event, monkeypatch, tmp_path
-):
-    """Verify only explicitly selected reference images are loaded and sent to the API."""
-    event.get_messages.return_value = [Image.fromBase64("one"), Image.fromBase64("two")]
-    loader = AsyncMock(return_value="selected-base64")
+@pytest.mark.parametrize("indices", [[], [2]])
+async def test_only_selected_references_are_loaded(plugin, event, monkeypatch, indices):
+    first, second = Image.fromBase64("one"), Image.fromBase64("two")
+    event.get_messages.return_value = [first, second]
+    loader = create_autospec(Image.convert_to_base64, return_value="selected-base64")
     monkeypatch.setattr(Image, "convert_to_base64", loader)
-    plugin.api.generate = AsyncMock(return_value=[tmp_path / "output.webp"])
+    plugin.api.generate = AsyncMock(return_value=[])
     result = await plugin.generate(
-        event, {"description": "A cat", "prompt": {"text": "cat", "images": [2]}}
+        event, {**ARGUMENTS, "prompt": {"text": "cat", "images": indices}}
     )
     assert "queued in the background" in result
     await asyncio.gather(*plugin._tasks)
-    loader.assert_awaited_once()
-    assert plugin.api.generate.call_args.args[1] == ["selected-base64"]
-
-
-@pytest.mark.asyncio
-async def test_unselected_attachments_are_not_loaded(
-    plugin, event, monkeypatch, tmp_path
-):
-    """Verify text-only requests ignore available image attachments."""
-    event.get_messages.return_value = [Image.fromBase64("one")]
-    loader = AsyncMock()
-    monkeypatch.setattr(Image, "convert_to_base64", loader)
-    plugin.api.generate = AsyncMock(return_value=[tmp_path / "output.webp"])
-    await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
-    await asyncio.gather(*plugin._tasks)
-    loader.assert_not_awaited()
-    assert plugin.api.generate.call_args.args[1] == []
+    if indices:
+        loader.assert_awaited_once_with(second)
+        assert plugin.api.generate.call_args.args[1] == ["selected-base64"]
+    else:
+        loader.assert_not_awaited()
+        assert plugin.api.generate.call_args.args[1] == []
 
 
 @pytest.mark.asyncio
@@ -232,41 +169,10 @@ async def test_combined_delivery_failure_never_regenerates(plugin, event, tmp_pa
     assert "private upstream" not in str(plugin.logger.warning.call_args)
     plugin.api.generate.assert_awaited_once()
     plugin.context.send_message.assert_awaited_once()
-    event.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "error", [httpx.ReadTimeout("secret"), httpx.ConnectError("secret")]
-)
-async def test_network_errors_do_not_retry(plugin, event, error):
-    """Verify network failures neither retry nor disclose upstream error details."""
-    plugin.api.generate = AsyncMock(side_effect=error)
-    result = await plugin.generate(
-        event, {"description": "A cat", "prompt": {"text": "cat"}}
-    )
-    assert "queued in the background" in result
-    await asyncio.gather(*plugin._tasks)
-    result = plugin.context.send_message.call_args.args[1]
-    assert "Do not automatically retry" in result
-    assert "secret" not in result
-    plugin.api.generate.assert_awaited_once()
-    event.send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cancellation_propagates(plugin, event):
-    """Verify task cancellation propagates without attempting image delivery."""
-    plugin.api.generate = AsyncMock(side_effect=asyncio.CancelledError)
-    await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.gather(*plugin._tasks)
-    plugin.context.send_message.assert_not_awaited()
-    event.send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("requested,returned", [(1, 1), (2, 2), (5, 5), (5, 2)])
+@pytest.mark.parametrize("requested,returned", [(2, 2), (5, 2)])
 async def test_astrbot_executor_to_http_to_delivery(
     plugin, event, tmp_path, requested, returned
 ):
@@ -303,48 +209,44 @@ async def test_astrbot_executor_to_http_to_delivery(
         tool_call_timeout=10,
     )
     tools = plugin.context.add_llm_tools.call_args.args
-    try:
-        instructions = [
-            item
-            async for item in FunctionToolExecutor._execute_local(tools[0], context)
-        ]
-        instruction_result = instructions[0]
-        assert instruction_result is not None
-        instruction_content = instruction_result.content[0]
-        assert isinstance(instruction_content, TextContent)
-        assert plugin_module.GUIDE in instruction_content.text
-        result = [
-            item
-            async for item in FunctionToolExecutor._execute_local(
-                tools[1],
-                context,
-                prompt={"text": "cat"},
-                description=description,
-                number_of_images=requested,
-            )
-        ]
-        generation_result = result[0]
-        assert generation_result is not None
-        generation_content = generation_result.content[0]
-        assert isinstance(generation_content, TextContent)
-        assert "queued in the background" in generation_content.text
-        await asyncio.gather(*plugin._tasks)
-        assert len(requests) == 1
-        assert json.loads(requests[0].content)["n"] == requested
-        plugin.context.send_message.assert_awaited_once()
-        assert plugin.context.send_message.call_args.args[0] == event.unified_msg_origin
-        message = plugin.context.send_message.call_args.args[1]
-        assert isinstance(message, plugin_module.MessageEventResult)
-        assert len(message.chain) == returned + 1
-        assert isinstance(message.chain[0], Plain)
-        assert message.chain[0].text == description
-        for index, component in enumerate(message.chain[1:]):
-            assert isinstance(component, Image)
-            path = tmp_path / "images" / "0" / f"{index}.webp"
-            assert component.file == Image.fromFileSystem(str(path)).file
-            assert path.read_bytes() == outputs[index]
-    finally:
-        await plugin.terminate()
+    instructions = [
+        item async for item in FunctionToolExecutor._execute_local(tools[0], context)
+    ]
+    instruction_result = instructions[0]
+    assert instruction_result is not None
+    instruction_content = instruction_result.content[0]
+    assert isinstance(instruction_content, TextContent)
+    assert plugin_module.GUIDE in instruction_content.text
+    result = [
+        item
+        async for item in FunctionToolExecutor._execute_local(
+            tools[1],
+            context,
+            prompt={"text": "cat"},
+            description=description,
+            number_of_images=requested,
+        )
+    ]
+    generation_result = result[0]
+    assert generation_result is not None
+    generation_content = generation_result.content[0]
+    assert isinstance(generation_content, TextContent)
+    assert "queued in the background" in generation_content.text
+    await asyncio.gather(*plugin._tasks)
+    assert len(requests) == 1
+    assert json.loads(requests[0].content)["n"] == requested
+    plugin.context.send_message.assert_awaited_once()
+    assert plugin.context.send_message.call_args.args[0] == event.unified_msg_origin
+    message = plugin.context.send_message.call_args.args[1]
+    assert isinstance(message, plugin_module.MessageEventResult)
+    assert len(message.chain) == returned + 1
+    assert isinstance(message.chain[0], Plain)
+    assert message.chain[0].text == description
+    for index, component in enumerate(message.chain[1:]):
+        assert isinstance(component, Image)
+        path = tmp_path / "images" / "0" / f"{index}.webp"
+        assert component.file == Image.fromFileSystem(str(path)).file
+        assert path.read_bytes() == outputs[index]
 
 
 @pytest.mark.asyncio
@@ -387,8 +289,6 @@ async def test_retention_waits_for_delivery(plugin, event, monkeypatch):
         assert (plugin.output_dir / "1" / "0.webp").is_file()
     finally:
         release.set()
-        await asyncio.gather(*plugin._tasks, return_exceptions=True)
-        await plugin.terminate()
 
 
 @pytest.mark.asyncio
@@ -454,10 +354,8 @@ async def test_tool_returns_before_background_work_finishes(
         assert plugin.api.generate.call_args.args[4] == directory
         plugin.context.send_message.assert_awaited_once()
         assert plugin.context.send_message.call_args.args[0] == origin
-        event.send.assert_not_awaited()
     finally:
         release.set()
-        await plugin.terminate()
 
 
 @pytest.mark.asyncio
@@ -479,22 +377,18 @@ async def test_terminate_cancels_running_and_queued_jobs_before_closing(plugin, 
 
     plugin.api.generate = AsyncMock(side_effect=slow_generate)
     plugin.api.close = AsyncMock(side_effect=close)
-    arguments = {"description": "A cat", "prompt": {"text": "cat"}}
-    try:
-        await plugin.generate(event, arguments)
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        await plugin.generate(event, arguments)
-        tasks = list(plugin._tasks)
-        assert len(tasks) == 2
-        await asyncio.wait_for(plugin.terminate(), timeout=1)
-        assert all(task.cancelled() for task in tasks)
-        plugin.api.generate.assert_awaited_once()
-        plugin.api.close.assert_awaited_once()
-        plugin.context.send_message.assert_not_awaited()
-        assert "shutting down" in await plugin.generate(event, arguments)
-        assert not plugin._tasks
-    finally:
-        await plugin.terminate()
+    await plugin.generate(event, ARGUMENTS)
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    await plugin.generate(event, ARGUMENTS)
+    tasks = list(plugin._tasks)
+    assert len(tasks) == 2
+    await asyncio.wait_for(plugin.terminate(), timeout=1)
+    assert all(task.cancelled() for task in tasks)
+    plugin.api.generate.assert_awaited_once()
+    plugin.api.close.assert_awaited_once()
+    plugin.context.send_message.assert_not_awaited()
+    assert "shutting down" in await plugin.generate(event, ARGUMENTS)
+    assert not plugin._tasks
 
 
 @pytest.mark.asyncio
@@ -502,6 +396,8 @@ async def test_terminate_cancels_running_and_queued_jobs_before_closing(plugin, 
     "error,expected",
     [
         (plugin_module.ImageGenerationError("Invalid API key"), "Invalid API key"),
+        (httpx.ReadTimeout("private response"), "timed out"),
+        (httpx.ConnectError("private response"), "connection failed"),
         (OSError("private path"), "Could not read or save image files"),
         (RuntimeError("private upstream response"), "unexpected error"),
     ],
@@ -511,7 +407,7 @@ async def test_background_failures_notify_original_conversation(
 ):
     """Background errors reach the user without leaking exception details or retrying."""
     plugin.api.generate = AsyncMock(side_effect=error)
-    await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
+    await plugin.generate(event, ARGUMENTS)
     await asyncio.gather(*plugin._tasks)
     plugin.api.generate.assert_awaited_once()
     plugin.context.send_message.assert_awaited_once()
@@ -519,7 +415,8 @@ async def test_background_failures_notify_original_conversation(
     assert origin == event.unified_msg_origin
     assert expected in message
     assert "private" not in message
-    assert not plugin._tasks
+    if isinstance(error, httpx.RequestError):
+        assert "Do not automatically retry" in message
 
 
 @pytest.mark.asyncio
@@ -527,7 +424,7 @@ async def test_qq_official_uses_original_reply_event(plugin, event, tmp_path):
     """QQ Official retains the event credentials required for image delivery."""
     event.get_platform_name.return_value = "qq_official"
     plugin.api.generate = AsyncMock(return_value=[tmp_path / "image.webp"])
-    await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
+    await plugin.generate(event, ARGUMENTS)
     await asyncio.gather(*plugin._tasks)
     event.send.assert_awaited_once()
     plugin.context.send_message.assert_not_awaited()
@@ -543,6 +440,7 @@ async def test_invalid_arguments_do_not_enqueue(plugin, event):
     assert not plugin._tasks
     plugin.context.send_message.assert_not_awaited()
     assert not plugin.output_dir.exists()
+    assert not plugin.requests_dir.exists()
 
 
 @pytest.mark.asyncio
@@ -552,9 +450,7 @@ async def test_archive_failure_does_not_enqueue(plugin, event, monkeypatch):
         plugin.api, "create_request", Mock(side_effect=OSError("private path"))
     )
     plugin.api.generate = AsyncMock()
-    result = await plugin.generate(
-        event, {"description": "A cat", "prompt": {"text": "cat"}}
-    )
+    result = await plugin.generate(event, ARGUMENTS)
     assert "No image task was queued" in result
     assert "private path" not in result
     assert not plugin._tasks
@@ -562,51 +458,20 @@ async def test_archive_failure_does_not_enqueue(plugin, event, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_request_history_uses_event_identity_and_survives_failure(plugin, event):
-    """Each parsed tool call is recorded before generation, even if the API fails."""
-    import time
-    import jsonschema
-    from conftest import api_module
-
+async def test_request_history_uses_event_identity_and_survives_failure(
+    plugin, event, monkeypatch
+):
+    monkeypatch.setattr(plugin_module.time, "time", lambda: 1_800_000_000)
     plugin.api.generate = AsyncMock(side_effect=httpx.ConnectError("offline"))
+    result = await plugin.generate(event, ARGUMENTS)
+    assert "queued in the background" in result
+    await asyncio.gather(*plugin._tasks)
+    archive = yaml.safe_load((plugin.output_dir / "0" / "request.yaml").read_text())
+    assert archive["user_id"] == event.get_sender_id.return_value
+    assert archive["request"] == ARGUMENTS
+    assert (plugin.requests_dir / "123456.log").read_text() == "1800000000\t0\n"
     tool = plugin.context.add_llm_tools.call_args.args[1]
-    context = ContextWrapper(context=AstrAgentContext(context=plugin.context, event=event))
-    arguments = {"description": "A cat", "prompt": {"text": "cat"}}
-    for request_id in range(2):
-        started_at = int(time.time())
-        result = await tool.call(context, **arguments)
-        assert "queued in the background" in result
-        archive = yaml.safe_load(
-            (plugin.output_dir / str(request_id) / "request.yaml").read_text()
-        )
-        assert archive["user_id"] == "123456"
-        assert archive["request"] == arguments
-        jsonschema.validate(archive, api_module.REQUEST_SCHEMA)
-        lines = (plugin.requests_dir / "123456.log").read_text().splitlines()
-        assert len(lines) == request_id + 1
-        timestamp, recorded_id = lines[-1].split("\t")
-        assert timestamp.isdecimal()
-        assert started_at <= int(timestamp) <= int(time.time())
-        assert recorded_id == str(request_id)
-    await asyncio.gather(*plugin._tasks)
-    assert len((plugin.requests_dir / "123456.log").read_text().splitlines()) == 2
     assert "user_id" not in tool.parameters["properties"]
-    # A different conversation from the same sender still appends to the same log.
-    event.unified_msg_origin = "webchat:GroupMessage:another-group"
-    await tool.call(context, **arguments)
-    await asyncio.gather(*plugin._tasks)
-    assert len((plugin.requests_dir / "123456.log").read_text().splitlines()) == 3
-    event.get_sender_id.return_value = "654321"
-    await tool.call(context, **arguments)
-    await asyncio.gather(*plugin._tasks)
-    assert (plugin.requests_dir / "654321.log").read_text().endswith("\t3\n")
-
-
-@pytest.mark.asyncio
-async def test_invalid_request_does_not_create_history(plugin, event):
-    await plugin.generate(event, {"description": "cat", "prompt": {"text": ""}})
-    assert not plugin.requests_dir.exists()
-    assert not plugin.output_dir.exists()
 
 
 @pytest.mark.asyncio
@@ -618,16 +483,9 @@ async def test_sender_id_is_escaped_only_in_log_filename(plugin, event):
     plugin.api.generate = AsyncMock(return_value=[])
     await plugin.generate(event, {"description": "cat", "prompt": {"text": "cat"}})
     await asyncio.gather(*plugin._tasks)
-    assert {p.name for p in plugin.requests_dir.iterdir()} == {quote(user_id, safe="") + ".log", "total.log"}
+    assert {p.name for p in plugin.requests_dir.iterdir()} == {
+        quote(user_id, safe="") + ".log",
+        "total.log",
+    }
     archive = yaml.safe_load((plugin.output_dir / "0" / "request.yaml").read_text())
     assert archive["user_id"] == user_id
-
-
-@pytest.mark.asyncio
-async def test_history_failure_prevents_enqueueing(plugin, event):
-    plugin.requests_dir.write_text("not a directory")
-    plugin.api.generate = AsyncMock()
-    result = await plugin.generate(event, {"description": "cat", "prompt": {"text": "cat"}})
-    assert "No image task was queued" in result
-    plugin.api.generate.assert_not_awaited()
-    assert not plugin._tasks

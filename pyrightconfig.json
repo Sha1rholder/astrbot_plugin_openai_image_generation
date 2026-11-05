@@ -1,8 +1,0 @@
-{
-  "extends": "../../../pyproject.toml",
-  "include": ["main.py", "image_api.py", "tests"],
-  "exclude": [],
-  "extraPaths": ["../../.."],
-  "venvPath": ".",
-  "venv": ".venv"
-}

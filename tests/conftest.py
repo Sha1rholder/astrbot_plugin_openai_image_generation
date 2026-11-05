@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import create_autospec
 
 import pytest
+import pytest_asyncio
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
@@ -19,22 +20,26 @@ plugin_module = importlib.import_module(f"{ROOT.name}.main")
 api_module = importlib.import_module(f"{ROOT.name}.image_api")
 
 
-@pytest.fixture
-def api(tmp_path, monkeypatch):
+@pytest_asyncio.fixture
+async def api(tmp_path, monkeypatch):
     """Create an API instance with isolated metadata and no environment API key."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     (tmp_path / "metadata.yaml").write_bytes((ROOT / "metadata.yaml").read_bytes())
-    return api_module.ImageAPI({}, tmp_path)
+    instance = api_module.ImageAPI({}, tmp_path)
+    yield instance
+    await instance.close()
 
 
-@pytest.fixture
-def plugin(tmp_path, monkeypatch):
+@pytest_asyncio.fixture
+async def plugin(tmp_path, monkeypatch):
     """Create a plugin with mocked AstrBot context and a temporary data directory."""
     monkeypatch.setattr(plugin_module.StarTools, "get_data_dir", lambda _: tmp_path)
     context = create_autospec(plugin_module.Context, instance=True)
     context.send_message.return_value = True
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    return plugin_module.WebpImagePlugin(context, {"api_key": "test-key"})
+    instance = plugin_module.WebpImagePlugin(context, {"api_key": "test-key"})
+    yield instance
+    await instance.terminate()
 
 
 @pytest.fixture
