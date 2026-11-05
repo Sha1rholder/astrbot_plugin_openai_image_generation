@@ -1,6 +1,6 @@
 # Image generation instructions
 
-Use `oai_image_api_webp_generate` to generate and deliver lossless static WebP with OpenAI's latest image generation models, currently `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`. Unless user specifies, in most cases you should omit optional arguments as all have reasonable defaults.
+Use `openai_image_api_generation_webp` to generate and deliver lossless static WebP with OpenAI's latest image generation models, currently `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`. Unless user specifies, in most cases you should omit optional arguments as all have reasonable defaults.
 
 ## Parameters
 

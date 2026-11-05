@@ -24,8 +24,8 @@ def test_registered_tools_have_plugin_ownership(plugin):
     """Verify tool ownership and schema compatibility with supported providers."""
     tools = plugin.context.add_llm_tools.call_args.args
     assert {tool.name for tool in tools} == {
-        "get_oai_image_api_webp_generate_instructions",
-        "oai_image_api_webp_generate",
+        "get_openai_image_api_generation_webp_instructions",
+        "openai_image_api_generation_webp",
     }
     assert all(
         _resolve_tool_handler_module_path(tool) == plugin_module.__name__

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/Sha1rholder/astrbot_plugin_oai_image_api_webp_generate/main/request.schema.json",
+  "$id": "https://raw.githubusercontent.com/Sha1rholder/astrbot_plugin_openai_image_generation/main/request.schema.json",
   "title": "Archived image generation tool request",
-  "description": "Format of request.yaml saved by astrbot_plugin_oai_image_api_webp_generate. Each numbered request directory also contains description.txt and zero-based WebP image files. Interpret the request using the recorded plugin version; this schema describes the current tool contract.",
+  "description": "Format of request.yaml saved by astrbot_plugin_openai_image_generation. Each numbered request directory also contains description.txt and zero-based WebP image files. Interpret the request using the recorded plugin version; this schema describes the current tool contract.",
   "type": "object",
   "properties": {
     "plugin_version": {
@@ -119,7 +119,7 @@
         "description"
       ],
       "additionalProperties": false,
-      "description": "The original JSON arguments supplied by the LLM to oai_image_api_webp_generate, before defaults, prompt trimming, model name expansion or Image API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
+      "description": "The original JSON arguments supplied by the LLM to openai_image_api_generation_webp, before defaults, prompt trimming, model name expansion or Image API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
     }
   },
   "required": [
