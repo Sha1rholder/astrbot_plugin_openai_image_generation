@@ -1,0 +1,21 @@
+{
+  "api_key": {
+    "description": "OpenAI API key",
+    "type": "string",
+    "secret": true,
+    "default": "",
+    "hint": "If empty, read OPENAI_API_KEY from the environment, then the plugin's OPENAI_API_KEY or .local/OPENAI_API_KEY file."
+  },
+  "base_url": {
+    "description": "Image API base URL",
+    "type": "string",
+    "default": "https://api.openai.com/v1",
+    "hint": "Include /v1, not /images/generations. Reference images require JSON support for /images/edits."
+  },
+  "timeout_seconds": {
+    "description": "API request timeout in seconds",
+    "type": "int",
+    "default": 300,
+    "hint": "Set AstrBot's tool timeout higher, allowing time for reference loading and delivery. Failed requests are not automatically retried."
+  }
+}
