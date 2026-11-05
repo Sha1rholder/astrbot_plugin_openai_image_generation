@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 from unittest.mock import AsyncMock
 
 import httpx
@@ -67,8 +68,13 @@ def test_reference_order_and_english_instructions(plugin, event):
     assert plugin.reference_images(event) == [first, second, quoted]
     guide = plugin.instructions(event)
     assert "1, 2, 3" in guide
+    assert (
+        f"Image archive directory on the AstrBot host: {plugin.output_dir.resolve()}"
+        in guide
+    )
     assert "sunburst" in guide and "flare" in guide
-    assert not any("\u4e00" <= char <= "\u9fff" for char in guide)
+    prose = re.sub(r"\{[^\n]*\}", "", guide)
+    assert not any("\u4e00" <= char <= "\u9fff" for char in prose)
     assert not any("\u4e00" <= char <= "\u9fff" for char in plugin_module.SYSTEM_HINT)
     assert not any(
         "\u4e00" <= char <= "\u9fff"
@@ -87,7 +93,9 @@ async def test_help_command(plugin, event):
 async def test_invalid_references_do_not_call_api(plugin, event):
     """Verify nonexistent references prevent generation and delivery."""
     plugin.api.generate = AsyncMock()
-    result = await plugin.generate(event, {"prompt": {"text": "cat", "images": [1]}})
+    result = await plugin.generate(
+        event, {"description": "A cat", "prompt": {"text": "cat", "images": [1]}}
+    )
     assert "does not exist" in result
     plugin.api.generate.assert_not_awaited()
     event.send.assert_not_awaited()
@@ -102,7 +110,9 @@ async def test_only_selected_references_are_loaded(
     loader = AsyncMock(return_value="selected-base64")
     monkeypatch.setattr(Image, "convert_to_base64", loader)
     plugin.api.generate = AsyncMock(return_value=[tmp_path / "output.webp"])
-    result = await plugin.generate(event, {"prompt": {"text": "cat", "images": [2]}})
+    result = await plugin.generate(
+        event, {"description": "A cat", "prompt": {"text": "cat", "images": [2]}}
+    )
     assert "delivered 1" in result
     loader.assert_awaited_once()
     assert plugin.api.generate.call_args.args[1] == ["selected-base64"]
@@ -117,7 +127,7 @@ async def test_unselected_attachments_are_not_loaded(
     loader = AsyncMock()
     monkeypatch.setattr(Image, "convert_to_base64", loader)
     plugin.api.generate = AsyncMock(return_value=[tmp_path / "output.webp"])
-    await plugin.generate(event, {"prompt": {"text": "cat"}})
+    await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
     loader.assert_not_awaited()
     assert plugin.api.generate.call_args.args[1] == []
 
@@ -130,7 +140,9 @@ async def test_reference_loading_failure_prevents_api_call(plugin, event, monkey
         Image, "convert_to_base64", AsyncMock(side_effect=OSError("private path"))
     )
     plugin.api.generate = AsyncMock()
-    result = await plugin.generate(event, {"prompt": {"text": "cat", "images": [1]}})
+    result = await plugin.generate(
+        event, {"description": "A cat", "prompt": {"text": "cat", "images": [1]}}
+    )
     assert "No Image API request" in result
     assert "private path" not in result
     plugin.api.generate.assert_not_awaited()
@@ -144,7 +156,8 @@ async def test_partial_delivery_never_regenerates(plugin, event, tmp_path):
     )
     event.send.side_effect = [None, RuntimeError("private upstream response")]
     result = await plugin.generate(
-        event, {"prompt": {"text": "cat"}, "number_of_images": 2}
+        event,
+        {"description": "A cat", "prompt": {"text": "cat"}, "number_of_images": 2},
     )
     assert "Generated 2" in result and "delivered 1" in result
     assert "Do not regenerate" in result and "private upstream" not in result
@@ -158,7 +171,9 @@ async def test_partial_delivery_never_regenerates(plugin, event, tmp_path):
 async def test_network_errors_do_not_retry(plugin, event, error):
     """Verify network failures neither retry nor disclose upstream error details."""
     plugin.api.generate = AsyncMock(side_effect=error)
-    result = await plugin.generate(event, {"prompt": {"text": "cat"}})
+    result = await plugin.generate(
+        event, {"description": "A cat", "prompt": {"text": "cat"}}
+    )
     assert "Do not automatically retry" in result
     assert "secret" not in result
     plugin.api.generate.assert_awaited_once()
@@ -170,7 +185,9 @@ async def test_cancellation_propagates(plugin, event):
     """Verify task cancellation propagates without attempting image delivery."""
     plugin.api.generate = AsyncMock(side_effect=asyncio.CancelledError)
     with pytest.raises(asyncio.CancelledError):
-        await plugin.generate(event, {"prompt": {"text": "cat"}})
+        await plugin.generate(
+            event, {"description": "A cat", "prompt": {"text": "cat"}}
+        )
     event.send.assert_not_awaited()
 
 
@@ -208,7 +225,7 @@ async def test_astrbot_executor_to_http_to_delivery(plugin, event, tmp_path):
         result = [
             item
             async for item in FunctionToolExecutor._execute_local(
-                tools[1], context, prompt={"text": "cat"}
+                tools[1], context, prompt={"text": "cat"}, description="A cat"
             )
         ]
         generation_result = result[0]
@@ -221,8 +238,54 @@ async def test_astrbot_executor_to_http_to_delivery(plugin, event, tmp_path):
         component = event.send.call_args.args[0][0]
         assert isinstance(component, Image)
         assert (
-            list((tmp_path / "images").glob("*.webp"))[0].read_bytes()
+            list((tmp_path / "images").glob("*/*.webp"))[0].read_bytes()
             == output.getvalue()
         )
     finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
+async def test_retention_waits_for_delivery(plugin, event):
+    """A second request must not prune files still being delivered by the first."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_send = event.send
+
+    async def slow_send(result):
+        entered.set()
+        await release.wait()
+        return await original_send(result)
+
+    event.send = slow_send
+    plugin.api.config["max_saved_requests"] = 1
+    output = io.BytesIO()
+    PILImage.new("RGB", (16, 16), "blue").save(output, "WEBP")
+    encoded = base64.b64encode(output.getvalue()).decode()
+    plugin.api.client = httpx.AsyncClient(
+        base_url="https://example.invalid/v1/",
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json={"data": [{"b64_json": encoded}]})
+        ),
+    )
+    arguments = {"prompt": {"text": "cat"}, "description": "cat"}
+    first = asyncio.create_task(plugin.generate(event, arguments))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        second = asyncio.create_task(plugin.generate(event, arguments))
+        await asyncio.sleep(0)
+        assert (plugin.output_dir / "0" / "0.webp").is_file()
+        assert not (plugin.output_dir / "1").exists()
+        release.set()
+        assert all(
+            "delivered 1" in result for result in await asyncio.gather(first, second)
+        )
+        assert not (plugin.output_dir / "0").exists()
+        assert (plugin.output_dir / "1" / "0.webp").is_file()
+    finally:
+        release.set()
+        await asyncio.gather(
+            first, *([second] if second else []), return_exceptions=True
+        )
         await plugin.terminate()

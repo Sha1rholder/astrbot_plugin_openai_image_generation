@@ -10,11 +10,10 @@ AstrBot生图插件，调用`gpt-image-2.6-flare`或`gpt-image-2.6-sunburst`，�
 
 密钥按以下优先级读取：插件配置`api_key`、环境变量`OPENAI_API_KEY`、插件目录下的`OPENAI_API_KEY`文件、插件目录下的`.local/OPENAI_API_KEY`文件
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `api_key` | 空 | OpenAI API密钥，在管理页中遮罩显示 |
-| `base_url` | `https://api.openai.com/v1` | API根地址，代理必须支持相应模型及JSON格式的Image API |
-| `timeout_seconds` | 300 | 单次API请求的网络超时，不自动重试 |
+- `api_key`: OpenAI API密钥，在管理页中遮罩显示
+- `base_url`: API根地址，代理必须支持相应模型及JSON格式的Image API
+- `max_saved_requests`: 最大持久化生图请求数量，必须为正整数
+- `timeout_seconds`: 单次API请求的网络超时，不自动重试
 
 在AstrBot的Agent配置中将工具调用超时设得大于API请求超时，建议至少360秒；较多参考图、Sunburst或高质量输出可能需要更长时间
 修改配置后重载插件以重新创建连接
@@ -42,7 +41,29 @@ AstrBot生图插件，调用`gpt-image-2.6-flare`或`gpt-image-2.6-sunburst`，�
 固定使用`output_format=webp`、`output_compression=100`、`moderation=low`、`partial_images=0`、`stream=false`
 质量100是API的压缩参数，不承诺编码一定无损；插件验证返回格式后保存原始字节，不重新编码
 
-生成结果保存在AstrBot数据目录下的`plugin_data/astrbot_plugin_oai_image_api_webp_generate/images/`，卸载或重载时不删除，管理员可按需清理
+生成结果保存在AstrBot数据目录下的`plugin_data/astrbot_plugin_oai_image_api_webp_generate/images/`，按请求归档：
+
+```text
+images/
+  0/
+    0.webp
+    1.webp
+    description.txt
+    request.yaml
+  1/
+    0.webp
+    description.txt
+    request.yaml
+```
+
+每次请求前扫描已有数字目录，取最大编号加1（包含0目录），没有数字目录时从0开始；不持久化计数器，清空全部请求目录后编号重新从0开始；每次返回的图片在请求目录内从`0.webp`开始编号
+模型必须显式提供简短的`description`，保存到`description.txt`；`request.yaml`的`request`字段记录模型传给工具的原始参数（保留省略字段和显式null），`plugin_version`从插件`metadata.yaml`的`version`读取
+`request.yaml`首行通过`yaml-language-server`注释引用仓库的`request.schema.json`，该schema说明归档结构及模型工具参数，并作为工具参数校验的来源
+描述和原始工具参数仅用于本地归档，不作为额外字段发送给Image API
+
+`max_saved_requests`默认10。成功保存请求编号N后，删除编号小于等于`N - max_saved_requests`的目录及其全部内容；同一请求生成多张图片仍只占一个保留名额。修改上限后在下一次成功保存时生效
+失败响应不会触发清理；保存采用临时目录完成后整体发布，写入失败不会占用请求编号。并发工具调用按顺序生成和发送，防止尚未发送的图片被后续请求清理
+旧版平铺的UUID图片及其他非数字目录不参与本次编号清理，管理员可按需清理
 平台可能对图片重新压缩，原始WebP以数据目录内的文件为准
 如果图片发送失败，工具会报告已生成、已发送的数量和保存目录，避免把平台发送失败误判为生成失败
 超时或网络中断时服务端可能仍已计费，插件不会自动重试

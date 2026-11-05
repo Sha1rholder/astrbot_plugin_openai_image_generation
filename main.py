@@ -71,6 +71,7 @@ class WebpImagePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         """Initialize the API and output directory, then register both image tools."""
         super().__init__(context)
+        self._generation_lock = asyncio.Lock()
         self.api = ImageAPI(config, Path(__file__).parent)
         self.output_dir = StarTools.get_data_dir(PLUGIN_NAME) / "images"
         self.context.add_llm_tools(ImageInstructionsTool(self), GenerateWebpTool(self))
@@ -98,7 +99,10 @@ class WebpImagePlugin(Star):
         """Append the current message reference indices to the image generation guide."""
         images = self.reference_images(event)
         available = ", ".join(str(i) for i in range(1, len(images) + 1)) or "none"
-        return f"{GUIDE}\n\nAvailable reference image indices for this message: {available}"
+        return (
+            f"{GUIDE}\n\nImage archive directory on the AstrBot host: {self.output_dir.resolve()}"
+            f"\nAvailable reference image indices for this message: {available}"
+        )
 
     @filter.command("image_help")
     async def image_help(
@@ -123,6 +127,13 @@ class WebpImagePlugin(Star):
             req.system_prompt += "\n" + SYSTEM_HINT
 
     async def generate(self, event: AstrMessageEvent, arguments: dict[str, Any]) -> str:
+        """Serialize generation and delivery so retention cannot delete pending images."""
+        async with self._generation_lock:
+            return await self._generate(event, arguments)
+
+    async def _generate(
+        self, event: AstrMessageEvent, arguments: dict[str, Any]
+    ) -> str:
         """Generate images and report delivery separately from API success.
 
         Args:
@@ -150,7 +161,9 @@ class WebpImagePlugin(Star):
                         "Reference image loading failed: %s", type(exc).__name__
                     )
                     return f"Could not read reference image {index}. Ask the user to resend it. No Image API request was made."
-            paths = await self.api.generate(payload, encoded_images, self.output_dir)
+            paths = await self.api.generate(
+                payload, encoded_images, self.output_dir, arguments
+            )
         except ImageGenerationError as exc:
             return str(exc)
         except httpx.TimeoutException:

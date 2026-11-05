@@ -2,59 +2,30 @@ import asyncio
 import base64
 import binascii
 import io
+import json
 import math
 import os
+import shutil
+import tempfile
+import threading
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import httpx
 import jsonschema
+import yaml
 from PIL import Image, UnidentifiedImageError
 
-INPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "prompt": {
-            "type": "object",
-            "description": "Image description and optional reference image indices.",
-            "properties": {
-                "text": {"type": "string", "minLength": 1, "maxLength": 32000},
-                "images": {
-                    "type": "array",
-                    "description": "One-based reference image indices from the instructions tool. Omit for text-only generation.",
-                    "items": {"type": "integer", "minimum": 1},
-                    "maxItems": 16,
-                    "uniqueItems": True,
-                },
-            },
-            "required": ["text"],
-            "additionalProperties": False,
-        },
-        "model": {"type": ["string", "null"], "enum": ["sunburst", "flare", None]},
-        "size": {
-            "type": ["string", "null"],
-            "description": "Image size as WIDTHxHEIGHT, e.g. 1536x1024. Both dimensions must be multiples of 16 between 16 and 3840. Aspect ratio must be between 1:3 and 3:1, with 655360 to 8294400 total pixels. Omit for automatic sizing.",
-            "pattern": "^[0-9]{1,4}x[0-9]{1,4}$",
-        },
-        "quality": {
-            "type": ["string", "null"],
-            "enum": ["low", "medium", "high", "xhigh", "max", None],
-        },
-        "complexity": {
-            "type": ["string", "null"],
-            "enum": ["low", "medium", "high", None],
-        },
-        "background_transparency": {
-            "type": ["string", "null"],
-            "enum": ["transparent", "opaque", None],
-        },
-        "number_of_images": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
-    },
-    "required": ["prompt"],
-    "additionalProperties": False,
-}
+# The archive schema is also the source of truth for the LLM tool arguments.
+REQUEST_SCHEMA: dict[str, Any] = json.loads(
+    Path(__file__).with_name("request.schema.json").read_text(encoding="utf-8")
+)
+INPUT_SCHEMA: dict[str, Any] = REQUEST_SCHEMA["properties"]["request"]
+
+
+STORAGE_LOCK = threading.Lock()
 
 
 class ImageGenerationError(Exception):
@@ -89,6 +60,8 @@ class ImageAPI:
             raise ImageGenerationError(
                 f"Invalid image arguments: {location} violates the {exc.validator} constraint. Read the usage instructions."
             ) from None
+        if not arguments["description"].strip():
+            raise ImageGenerationError("The image description must not be blank.")
         prompt = arguments["prompt"]["text"].strip()
         if not prompt:
             raise ImageGenerationError("The image prompt must not be blank.")
@@ -96,7 +69,10 @@ class ImageAPI:
         api_size = "auto"
         if size is not None:
             width, height = map(int, size.split("x"))
-            if any(not 16 <= dimension <= 3840 or dimension % 16 for dimension in (width, height)):
+            if any(
+                not 16 <= dimension <= 3840 or dimension % 16
+                for dimension in (width, height)
+            ):
                 raise ImageGenerationError(
                     "Image dimensions must be multiples of 16 between 16 and 3840."
                 )
@@ -125,15 +101,42 @@ class ImageAPI:
         }
         return payload, [int(index) for index in arguments["prompt"].get("images", [])]
 
+    def storage_limit(self) -> int:
+        """Validate retention settings before requesting images."""
+        limit = self.config.get("max_saved_requests", 10)
+        if type(limit) is not int or limit < 1:
+            raise ImageGenerationError("max_saved_requests must be a positive integer.")
+        return limit
+
+    @staticmethod
+    def next_request_id(output_dir: Path) -> int:
+        """Derive the next ID from existing numeric directories, including zero."""
+        if not output_dir.exists():
+            return 0
+        existing = (
+            int(path.name)
+            for path in output_dir.iterdir()
+            if path.name.isascii()
+            and path.name.isdecimal()
+            and not path.is_symlink()
+            and path.is_dir()
+        )
+        return max(existing, default=-1) + 1
+
     async def generate(
-        self, payload: dict[str, Any], references: list[str], output_dir: Path
+        self,
+        payload: dict[str, Any],
+        references: list[str],
+        output_dir: Path,
+        arguments: dict[str, Any],
     ) -> list[Path]:
         """Call only Image API endpoints, with no automatic paid-request retries.
 
         Args:
             payload: A payload produced by prepare.
             references: Base64 image attachments explicitly selected by the caller.
-            output_dir: Persistent directory for the original WebP files.
+            output_dir: Persistent directory for archived requests.
+            arguments: Original model tool arguments, preserved without API defaults.
 
         Returns:
             Paths to validated WebP outputs.
@@ -143,6 +146,20 @@ class ImageAPI:
             httpx.RequestError: If the request cannot be completed.
             OSError: If the output cannot be saved.
         """
+        arguments = deepcopy(arguments)
+        self.prepare(arguments)
+        limit = self.storage_limit()
+        try:
+            metadata = yaml.safe_load(
+                (self.plugin_dir / "metadata.yaml").read_text(encoding="utf-8")
+            )
+            version = metadata["version"]
+            if not isinstance(version, str) or not version:
+                raise ValueError
+        except (OSError, yaml.YAMLError, KeyError, TypeError, ValueError):
+            raise ImageGenerationError(
+                "Cannot read the plugin version from metadata.yaml. No Image API request was made."
+            ) from None
         if self.client is None:
             api_key = (
                 str(self.config.get("api_key") or "").strip()
@@ -199,6 +216,7 @@ class ImageAPI:
         if references:
             endpoint = "images/edits"
             body["images"] = await asyncio.to_thread(self.reference_payload, references)
+        request_id = await asyncio.to_thread(self.next_request_id, output_dir)
         response = await self.client.post(endpoint, json=body)
         if not response.is_success:
             explanation = {
@@ -218,7 +236,14 @@ class ImageAPI:
                 "The image service returned invalid JSON. Do not automatically retry."
             ) from None
         return await asyncio.to_thread(
-            self.save_images, result, output_dir, payload["n"]
+            self.save_images,
+            result,
+            output_dir,
+            payload["n"],
+            arguments,
+            version,
+            limit,
+            request_id,
         )
 
     @staticmethod
@@ -260,13 +285,25 @@ class ImageAPI:
         return images
 
     @staticmethod
-    def save_images(result: object, output_dir: Path, requested: int) -> list[Path]:
+    def save_images(
+        result: object,
+        output_dir: Path,
+        requested: int,
+        arguments: dict[str, Any],
+        plugin_version: str,
+        max_saved_requests: int = 10,
+        request_id: int | None = None,
+    ) -> list[Path]:
         """Validate all images, then save the API bytes without recompression.
 
         Args:
             result: The decoded API response.
             output_dir: Directory for generated images.
             requested: Maximum permitted response count.
+            arguments: Original tool arguments, including the required description.
+            plugin_version: Version read from the plugin metadata.
+            max_saved_requests: Positive request retention limit.
+            request_id: ID selected before the HTTP request, or derived for direct saves.
 
         Returns:
             Paths of the generated WebP files.
@@ -275,6 +312,7 @@ class ImageAPI:
             ImageGenerationError: If the service did not return valid WebP images.
             OSError: If files cannot be written.
         """
+        ImageAPI.prepare(arguments)
         data = result.get("data") if isinstance(result, dict) else None
         if not isinstance(data, list) or not 1 <= len(data) <= requested:
             raise ImageGenerationError(
@@ -302,13 +340,52 @@ class ImageAPI:
                 raise ImageGenerationError(
                     "The image service did not return valid WebP images. Do not automatically retry."
                 ) from None
-        output_dir.mkdir(parents=True, exist_ok=True)
-        paths: list[Path] = []
-        for raw in decoded:
-            path = output_dir / f"{uuid4().hex}.webp"
-            path.write_bytes(raw)
-            paths.append(path)
-        return paths
+        # Stage the complete request so failed writes never expose a partial record.
+        # The plugin serializes requests through delivery; this lock also protects
+        # direct saves from concurrent publication and pruning in this process.
+        with STORAGE_LOCK:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            if request_id is None:
+                request_id = ImageAPI.next_request_id(output_dir)
+            directory = output_dir / str(request_id)
+            if directory.exists() or directory.is_symlink():
+                raise FileExistsError(f"Request directory already exists: {directory}")
+            with tempfile.TemporaryDirectory(
+                prefix=".pending-", dir=output_dir
+            ) as temporary:
+                staging = Path(temporary)
+                for index, raw in enumerate(decoded):
+                    (staging / f"{index}.webp").write_bytes(raw)
+                (staging / "description.txt").write_text(
+                    arguments["description"], encoding="utf-8"
+                )
+                (staging / "request.yaml").write_text(
+                    f"# yaml-language-server: $schema={REQUEST_SCHEMA['$id']}\n"
+                    + yaml.safe_dump(
+                        {"plugin_version": plugin_version, "request": arguments},
+                        allow_unicode=True,
+                        sort_keys=False,
+                    ),
+                    encoding="utf-8",
+                )
+                staging.replace(directory)
+            ImageAPI.prune_requests(output_dir, request_id - max_saved_requests)
+            return [directory / f"{index}.webp" for index in range(len(decoded))]
+
+    @staticmethod
+    def prune_requests(output_dir: Path, cutoff: int) -> None:
+        """Delete canonical numeric request directories at or below the cutoff."""
+        for directory in output_dir.iterdir():
+            name = directory.name
+            if (
+                name.isascii()
+                and name.isdecimal()
+                and str(int(name)) == name
+                and int(name) <= cutoff
+                and not directory.is_symlink()
+                and directory.is_dir()
+            ):
+                shutil.rmtree(directory)
 
     async def close(self) -> None:
         """Close an existing HTTP client and clear it so repeated cleanup is safe."""

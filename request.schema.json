@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Sha1rholder/astrbot_plugin_oai_image_api_webp_generate/main/request.schema.json",
+  "title": "Archived image generation tool request",
+  "description": "Format of request.yaml saved by astrbot_plugin_oai_image_api_webp_generate. Each numbered request directory also contains description.txt and zero-based WebP image files. Interpret the request using the recorded plugin version; this schema describes the current tool contract.",
+  "type": "object",
+  "properties": {
+    "plugin_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Plugin version read from the version field of metadata.yaml when this request was made."
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "object",
+          "description": "Full generation prompt and optional reference indices for the original chat message. Reference image bytes are not archived; indices alone cannot reconstruct attachments.",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            },
+            "images": {
+              "type": "array",
+              "description": "One-based reference image indices from the instructions tool. Omit for text-only generation.",
+              "items": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "maxItems": 16,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "description": {
+          "type": "string",
+          "description": "Required short description of the expected images, also stored verbatim in description.txt. Must not be blank.",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "sunburst",
+            "flare",
+            null
+          ],
+          "description": "Model alias. Omitted or null selects flare; the plugin maps the alias to gpt-image-2.6-{alias}."
+        },
+        "size": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Image size as WIDTHxHEIGHT, e.g. 1536x1024. Both dimensions must be multiples of 16 between 16 and 3840. Aspect ratio must be between 1:3 and 3:1, with 655360 to 8294400 total pixels. Omit for automatic sizing.",
+          "pattern": "^[0-9]{1,4}x[0-9]{1,4}$"
+        },
+        "quality": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            null
+          ],
+          "description": "Image quality. Omitted or null selects medium."
+        },
+        "complexity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            null
+          ],
+          "description": "Planning complexity. Omitted or null selects high."
+        },
+        "background_transparency": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "transparent",
+            "opaque",
+            null
+          ],
+          "description": "Background transparency. Omitted or null selects opaque."
+        },
+        "number_of_images": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Requested number of images, from 1 to 5. Omitted or null selects 1. Returned files are numbered from 0.webp within this request directory."
+        }
+      },
+      "required": [
+        "prompt",
+        "description"
+      ],
+      "additionalProperties": false,
+      "description": "The original JSON arguments supplied by the LLM to generate_webp_image, before defaults, prompt trimming, model name expansion or Image API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
+    }
+  },
+  "required": [
+    "plugin_version",
+    "request"
+  ],
+  "additionalProperties": false
+}

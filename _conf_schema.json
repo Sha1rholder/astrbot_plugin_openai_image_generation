@@ -17,5 +17,11 @@
     "type": "int",
     "default": 300,
     "hint": "Set AstrBot's tool timeout higher, allowing time for reference loading and delivery. Failed requests are not automatically retried."
+  },
+  "max_saved_requests": {
+    "description": "Maximum number of saved image generation requests",
+    "type": "int",
+    "default": 10,
+    "hint": "A positive integer. Images from each request are saved in the same numbered directory. After successfully saving request N, directories numbered less than or equal to N minus this limit are deleted."
   }
 }
