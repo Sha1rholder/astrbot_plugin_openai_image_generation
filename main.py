@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
+import time
+from collections import deque
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
+import yaml
 
 from astrbot.api import AstrBotConfig, FunctionTool
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
@@ -79,6 +84,7 @@ class WebpImagePlugin(Star):
         self._stopping = False
         self.api = ImageAPI(config, Path(__file__).parent)
         self.output_dir = StarTools.get_data_dir(PLUGIN_NAME) / "images"
+        self.requests_dir = self.output_dir.parent / "requests"
         self.context.add_llm_tools(ImageInstructionsTool(self), GenerateWebpTool(self))
 
     @staticmethod
@@ -149,14 +155,10 @@ class WebpImagePlugin(Star):
             return "The image plugin is shutting down. No image task was queued."
         arguments = deepcopy(arguments)
         try:
-            self.api.require_api_key()
             payload, indices = self.api.prepare(arguments)
         except ImageGenerationError as exc:
             return str(exc)
         references = self.reference_images(event)
-        if any(index > len(references) for index in indices):
-            return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
-        selected = [(index, references[index - 1]) for index in indices]
         origin = event.unified_msg_origin
         # Keep reservation order and background execution order identical so later
         # requests cannot prune an earlier request that has not run yet.
@@ -165,7 +167,7 @@ class WebpImagePlugin(Star):
                 return "The image plugin is shutting down. No image task was queued."
             try:
                 request_dir = await asyncio.to_thread(
-                    self.api.create_request, self.output_dir, arguments
+                    self._record_request, arguments, event.get_sender_id(), event.is_admin()
                 )
             except ImageGenerationError as exc:
                 return str(exc)
@@ -179,6 +181,13 @@ class WebpImagePlugin(Star):
                 )
             if self._stopping:
                 return "The image plugin is shutting down. No image task was queued."
+            try:
+                self.api.require_api_key()
+            except ImageGenerationError as exc:
+                return str(exc)
+            if any(index > len(references) for index in indices):
+                return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
+            selected = [(index, references[index - 1]) for index in indices]
             task = asyncio.create_task(
                 self._run_generation(
                     event, arguments, payload, selected, origin, request_dir
@@ -191,6 +200,167 @@ class WebpImagePlugin(Star):
             "do not wait or call the tool again for this request. The description and images will be sent "
             "automatically to this conversation when ready, or a failure notification if generation fails. "
             "The images have not been generated or delivered yet."
+        )
+
+    def _record_request(
+        self, arguments: dict[str, Any], user_id: str, is_admin: bool
+    ) -> Path:
+        """Archive a parsed request and append its receipt before any API work."""
+        if not user_id:
+            raise ImageGenerationError(
+                "Cannot identify the message sender. No image task was queued."
+            )
+        requested_at = int(time.time())
+        # Reserve total.log for anonymous aggregate receipts, even for a user named total.
+        filename = quote(user_id, safe="")
+        if filename == "total":
+            filename = "%74otal"
+        log_path = self.requests_dir / f"{filename}.log"
+        total_path = self.requests_dir / "total.log"
+        requested = arguments.get("number_of_images") or 1
+        # The enqueue lock covers both quota checks and both persisted receipts.
+        if not is_admin:
+            self._check_user_quota(log_path, user_id, requested, requested_at)
+            self._check_total_quota(total_path, requested, requested_at)
+        request_dir = self.api.create_request(self.output_dir, arguments, user_id=user_id)
+        self.requests_dir.mkdir(parents=True, exist_ok=True)
+        self._append_log(log_path, f"{requested_at}\t{request_dir.name}")
+        self._append_log(total_path, f"{requested_at}\t{str(is_admin).lower()}\t{requested}")
+        return request_dir
+
+    @staticmethod
+    def _read_log(path: Path) -> deque[str]:
+        """Read the most recent 1000 nonempty receipts without unbounded memory use."""
+        try:
+            with path.open(encoding="utf-8") as log:
+                return deque(
+                    (line.rstrip("\n") for line in log if line.strip()), maxlen=1000
+                )
+        except FileNotFoundError:
+            return deque(maxlen=1000)
+
+    @classmethod
+    def _append_log(cls, path: Path, receipt: str) -> None:
+        """Publish a bounded log atomically, dropping the oldest receipts first."""
+        lines = cls._read_log(path)
+        lines.append(receipt)
+        with tempfile.TemporaryDirectory(dir=path.parent, prefix=".log-") as temporary:
+            staging = Path(temporary) / path.name
+            staging.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            staging.replace(path)
+
+    def _quota_settings(self, scope: str, default_maximum: int) -> tuple[int, int]:
+        """Validate the live nonnegative window and image count settings."""
+        window_minutes = self.api.config.get(f"{scope}_window_minutes", 360)
+        maximum = self.api.config.get(f"{scope}_max_images", default_maximum)
+        for name, value in (
+            (f"{scope}_window_minutes", window_minutes),
+            (f"{scope}_max_images", maximum),
+        ):
+            if type(value) is not int or value < 0:
+                raise ImageGenerationError(f"{name} must be a nonnegative integer.")
+        return window_minutes, maximum
+
+    @staticmethod
+    def _check_remaining_quota(
+        scope: str, used: int, requested: int, maximum: int, window_minutes: int
+    ) -> None:
+        """Reject excess usage with an actionable explanation for the agent."""
+        if used + requested > maximum:
+            raise ImageGenerationError(
+                f"Image generation limit exceeded: {used}/{maximum} images used in "
+                f"the last {window_minutes} minutes ({scope}); this request needs {requested}, "
+                f"but only {max(0, maximum - used)} remain. "
+                "No image task was queued. Tell the user that their image request was not "
+                f"submitted because the {scope} would be exceeded. Explain the window, "
+                "used quota, remaining quota and requested image count in the user's language. "
+                "Suggest waiting for earlier requests to leave the window, or requesting "
+                "fewer images only if quota remains. Do not claim generation has started. "
+                "Do not automatically retry."
+            )
+
+    def _check_total_quota(self, log_path: Path, requested: int, now: int) -> None:
+        """Count every accepted request, including administrators, in the total window."""
+        window_minutes, maximum = self._quota_settings("total", 30)
+        if window_minutes == 0:
+            return
+        used = 0
+        try:
+            for line in self._read_log(log_path):
+                timestamp, admin, count = line.split("\t")
+                if not timestamp.isascii() or not timestamp.isdecimal():
+                    raise ValueError("Invalid receipt timestamp")
+                if not now - window_minutes * 60 < int(timestamp) <= now:
+                    continue
+                if (
+                    admin not in ("true", "false")
+                    or not count.isascii()
+                    or not count.isdecimal()
+                    or int(count) <= 0
+                ):
+                    raise ValueError("Invalid total receipt")
+                used += int(count)
+        except (OSError, UnicodeError, ValueError):
+            raise ImageGenerationError(
+                "Cannot verify the total image quota: total.log is unreadable or invalid. "
+                "No image task was queued. Tell the user generation could not start because "
+                "the shared usage history needs administrator attention. Do not automatically retry."
+            ) from None
+        self._check_remaining_quota(
+            "total quota for all users", used, requested, maximum, window_minutes
+        )
+
+    def _check_user_quota(
+        self, log_path: Path, user_id: str, requested: int, now: int
+    ) -> None:
+        """Read persisted receipts and YAML counts before accepting another request."""
+        window_minutes, maximum = self._quota_settings("user", 5)
+        if window_minutes == 0:
+            return
+        cutoff = now - window_minutes * 60
+        used = 0
+        try:
+            for line in self._read_log(log_path):
+                timestamp, request_id = line.split("\t")
+                if not timestamp.isascii() or not timestamp.isdecimal():
+                    raise ValueError("Invalid receipt timestamp")
+                # The sliding interval is (now - window, now].
+                if not cutoff < int(timestamp) <= now:
+                    continue
+                if (
+                    not request_id.isascii()
+                    or not request_id.isdecimal()
+                    or str(int(request_id)) != request_id
+                ):
+                    raise ValueError("Invalid request ID")
+                archive = yaml.safe_load(
+                    (self.output_dir / request_id / "request.yaml").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                if (
+                    not isinstance(archive, dict)
+                    or archive.get("user_id") != user_id
+                    or not isinstance(archive.get("request"), dict)
+                ):
+                    raise ValueError("Invalid request archive")
+                count = archive["request"].get("number_of_images")
+                if count is None:
+                    count = 1
+                if type(count) is not int or count <= 0:
+                    raise ValueError("Invalid archived image count")
+                used += count
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+            # Never treat missing or damaged in-window archives as unused quota.
+            raise ImageGenerationError(
+                "Cannot verify the image quota: request history or an in-window "
+                "request.yaml is missing or invalid. Restore the history or wait for "
+                "affected requests to leave the window. No image task was queued. "
+                "Tell the user generation could not start because their usage history "
+                "could not be verified; ask them to contact an administrator. Do not automatically retry."
+            ) from None
+        self._check_remaining_quota(
+            "personal quota", used, requested, maximum, window_minutes
         )
 
     async def _run_generation(

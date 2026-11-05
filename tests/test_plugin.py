@@ -137,7 +137,8 @@ async def test_generation_rechecks_key_before_enqueueing(plugin, event):
     assert "no usable OPENAI_API_KEY" in result
     assert "queued in the background" not in result
     assert not plugin._tasks
-    assert not plugin.output_dir.exists()
+    assert (plugin.output_dir / "0" / "request.yaml").is_file()
+    assert (plugin.requests_dir / "123456.log").is_file()
     plugin.api.generate.assert_not_awaited()
     plugin.context.send_message.assert_not_awaited()
 
@@ -560,3 +561,75 @@ async def test_archive_failure_does_not_enqueue(plugin, event, monkeypatch):
     assert "private path" not in result
     assert not plugin._tasks
     plugin.api.generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_history_uses_event_identity_and_survives_failure(plugin, event):
+    """Each parsed tool call is recorded before generation, even if the API fails."""
+    import time
+    import jsonschema
+    from conftest import api_module
+
+    plugin.api.generate = AsyncMock(side_effect=httpx.ConnectError("offline"))
+    tool = plugin.context.add_llm_tools.call_args.args[1]
+    context = ContextWrapper(context=AstrAgentContext(context=plugin.context, event=event))
+    arguments = {"description": "A cat", "prompt": {"text": "cat"}}
+    for request_id in range(2):
+        started_at = int(time.time())
+        result = await tool.call(context, **arguments)
+        assert "queued in the background" in result
+        archive = yaml.safe_load(
+            (plugin.output_dir / str(request_id) / "request.yaml").read_text()
+        )
+        assert archive["user_id"] == "123456"
+        assert archive["request"] == arguments
+        jsonschema.validate(archive, api_module.REQUEST_SCHEMA)
+        lines = (plugin.requests_dir / "123456.log").read_text().splitlines()
+        assert len(lines) == request_id + 1
+        timestamp, recorded_id = lines[-1].split("\t")
+        assert timestamp.isdecimal()
+        assert started_at <= int(timestamp) <= int(time.time())
+        assert recorded_id == str(request_id)
+    await asyncio.gather(*plugin._tasks)
+    assert len((plugin.requests_dir / "123456.log").read_text().splitlines()) == 2
+    assert "user_id" not in tool.parameters["properties"]
+    # A different conversation from the same sender still appends to the same log.
+    event.unified_msg_origin = "webchat:GroupMessage:another-group"
+    await tool.call(context, **arguments)
+    await asyncio.gather(*plugin._tasks)
+    assert len((plugin.requests_dir / "123456.log").read_text().splitlines()) == 3
+    event.get_sender_id.return_value = "654321"
+    await tool.call(context, **arguments)
+    await asyncio.gather(*plugin._tasks)
+    assert (plugin.requests_dir / "654321.log").read_text().endswith("\t3\n")
+
+
+@pytest.mark.asyncio
+async def test_invalid_request_does_not_create_history(plugin, event):
+    await plugin.generate(event, {"description": "cat", "prompt": {"text": ""}})
+    assert not plugin.requests_dir.exists()
+    assert not plugin.output_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_sender_id_is_escaped_only_in_log_filename(plugin, event):
+    from urllib.parse import quote
+
+    user_id = "../../someone/\n用户%"
+    event.get_sender_id.return_value = user_id
+    plugin.api.generate = AsyncMock(return_value=[])
+    await plugin.generate(event, {"description": "cat", "prompt": {"text": "cat"}})
+    await asyncio.gather(*plugin._tasks)
+    assert {p.name for p in plugin.requests_dir.iterdir()} == {quote(user_id, safe="") + ".log", "total.log"}
+    archive = yaml.safe_load((plugin.output_dir / "0" / "request.yaml").read_text())
+    assert archive["user_id"] == user_id
+
+
+@pytest.mark.asyncio
+async def test_history_failure_prevents_enqueueing(plugin, event):
+    plugin.requests_dir.write_text("not a directory")
+    plugin.api.generate = AsyncMock()
+    result = await plugin.generate(event, {"description": "cat", "prompt": {"text": "cat"}})
+    assert "No image task was queued" in result
+    plugin.api.generate.assert_not_awaited()
+    assert not plugin._tasks
