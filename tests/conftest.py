@@ -33,7 +33,8 @@ def plugin(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_module.StarTools, "get_data_dir", lambda _: tmp_path)
     context = create_autospec(plugin_module.Context, instance=True)
     context.send_message.return_value = True
-    return plugin_module.WebpImagePlugin(context, {})
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    return plugin_module.WebpImagePlugin(context, {"api_key": "test-key"})
 
 
 @pytest.fixture

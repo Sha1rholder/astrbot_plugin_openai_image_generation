@@ -39,6 +39,22 @@ class ImageAPI:
         self.plugin_dir = plugin_dir
         self.client: httpx.AsyncClient | None = None
 
+    def require_api_key(self) -> str:
+        """Resolve configured credentials or return an actionable error to the agent."""
+        api_key = (
+            str(self.config.get("api_key") or "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        if not api_key:
+            raise ImageGenerationError(
+                "Image generation is unavailable: no usable OPENAI_API_KEY is configured. "
+                "Configure api_key in the plugin settings, or provide the OPENAI_API_KEY environment variable. "
+                "Tell the user that image generation cannot start until an API key is configured. "
+                "Do not call the generation tool or claim that a request was submitted or queued. "
+                "No Image API request was made by this call."
+            )
+        return api_key
+
     @staticmethod
     def prepare(arguments: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
         """Validate tool arguments before constructing the Image API request.
@@ -181,14 +197,7 @@ class ImageAPI:
                 self.create_request, output_dir, arguments
             )
         if self.client is None:
-            api_key = (
-                str(self.config.get("api_key") or "").strip()
-                or os.getenv("OPENAI_API_KEY", "").strip()
-            )
-            if not api_key:
-                raise ImageGenerationError(
-                    "Configure api_key in the plugin settings, or provide the OPENAI_API_KEY environment variable."
-                )
+            api_key = self.require_api_key()
             base_url = (
                 str(self.config.get("base_url") or "https://api.openai.com/v1")
                 .strip()

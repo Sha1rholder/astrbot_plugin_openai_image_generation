@@ -25,7 +25,7 @@ SYSTEM_HINT = (
     f"Call {INSTRUCTIONS_TOOL_NAME} to generate static WebP with OpenAI Image API."
 )
 INSTRUCTIONS_TOOL_DESCRIPTION = (
-    "Read image generation instructions and available reference image indices."
+    "Check API key configuration, then read image generation instructions and available reference image indices."
 )
 GENERATION_TOOL_DESCRIPTION = "Generate static WebP with OpenAI Image API."
 GUIDE = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
@@ -101,7 +101,11 @@ class WebpImagePlugin(Star):
         return images
 
     def instructions(self, event: AstrMessageEvent) -> str:
-        """Append the current message reference indices to the image generation guide."""
+        """Check credentials before returning the guide and current reference indices."""
+        try:
+            self.api.require_api_key()
+        except ImageGenerationError as exc:
+            return str(exc)
         images = self.reference_images(event)
         available = ", ".join(str(i) for i in range(1, len(images) + 1)) or "none"
         return (
@@ -145,6 +149,7 @@ class WebpImagePlugin(Star):
             return "The image plugin is shutting down. No image task was queued."
         arguments = deepcopy(arguments)
         try:
+            self.api.require_api_key()
             payload, indices = self.api.prepare(arguments)
         except ImageGenerationError as exc:
             return str(exc)

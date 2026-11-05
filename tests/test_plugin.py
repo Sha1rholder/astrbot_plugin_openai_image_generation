@@ -84,6 +84,65 @@ def test_reference_order_and_english_instructions(plugin, event):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_value", [None, "", " \t\n"])
+async def test_instructions_tool_reports_missing_key(plugin, event, monkeypatch, missing_value):
+    """Missing credentials reach the agent instead of the generation guide."""
+    plugin.api.config["api_key"] = missing_value
+    if missing_value is not None:
+        monkeypatch.setenv("OPENAI_API_KEY", missing_value)
+    context = ContextWrapper(
+        context=AstrAgentContext(context=plugin.context, event=event)
+    )
+    tool = plugin.context.add_llm_tools.call_args.args[0]
+    results = [
+        item async for item in FunctionToolExecutor._execute_local(tool, context)
+    ]
+    result = results[0]
+    assert result is not None
+    content = result.content[0]
+    assert isinstance(content, TextContent)
+    assert "no usable OPENAI_API_KEY" in content.text
+    assert "Tell the user" in content.text
+    assert "Do not call the generation tool" in content.text
+    assert plugin_module.GUIDE not in content.text
+    assert not plugin._tasks
+    assert not plugin.output_dir.exists()
+
+
+@pytest.mark.parametrize("source", ["config", "environment"])
+def test_instructions_accept_configured_key_without_disclosing_it(plugin, event, monkeypatch, source):
+    """Both key sources allow instructions, including changes after an initial failure."""
+    plugin.api.config["api_key"] = " "
+    assert "no usable OPENAI_API_KEY" in plugin.instructions(event)
+    key = "test-private-api-key"
+    if source == "config":
+        plugin.api.config["api_key"] = " " + key + "\n"
+    else:
+        monkeypatch.setenv("OPENAI_API_KEY", " " + key + "\n")
+    result = plugin.instructions(event)
+    assert plugin_module.GUIDE in result
+    assert key not in result
+    assert plugin.api.client is None
+
+
+@pytest.mark.asyncio
+async def test_generation_rechecks_key_before_enqueueing(plugin, event):
+    """A key removed after reading instructions must prevent a queued acknowledgement."""
+    assert plugin_module.GUIDE in plugin.instructions(event)
+    plugin.api.config["api_key"] = ""
+    plugin.api.generate = AsyncMock()
+    result = await plugin.generate(
+        event, {"description": "A cat", "prompt": {"text": "cat"}}
+    )
+    assert "no usable OPENAI_API_KEY" in result
+    assert "queued in the background" not in result
+    assert not plugin._tasks
+    assert not plugin.output_dir.exists()
+    plugin.api.generate.assert_not_awaited()
+    plugin.context.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_help_command(plugin, event):
     """Verify the help command yields the message-specific instructions."""
     replies = [reply async for reply in plugin.image_help(event)]
