@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "display_name": "OpenAI Image API生图",
+    "desc": "一个极简、易用通过OpenAI Image API为agent提供OpenAI最新图像生成能力。系统提示词极简，图像生成记录持久保存，并提供合理且可由agent调整的默认参数。支持gpt-image-2.6-sunburst和gpt-image-2.6-flare"
+  },
+  "config": {
+    "api_key": {
+      "description": "OPENAI_API_KEY",
+      "hint": "在此填写API密钥，留空时读取环境变量OPENAI_API_KEY"
+    },
+    "base_url": {
+      "description": "图像API基础地址",
+      "hint": "地址应包含`/v1`，不要包含`/images/generations`。使用参考图像时，服务需支持向`/images/edits`发送JSON请求"
+    },
+    "timeout_seconds": {
+      "description": "API请求超时时间（秒）",
+      "hint": "请将AstrBot的工具超时时间设得更长，为加载参考图像和发送结果预留时间。请求失败后不会自动重试"
+    },
+    "max_saved_requests": {
+      "description": "保留的图像生成请求数上限",
+      "hint": "必须为正整数。同一次请求生成的图像保存在同一个编号目录中。成功保存第N次请求后，会删除编号小于或等于N减去此上限的目录"
+    }
+  }
+}

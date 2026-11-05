@@ -1,7 +1,7 @@
 name: astrbot_plugin_openai_image_generation
 display_name: OpenAI Image Generation
 desc: |
-  Provides your agent with latest image generation capabilities through OpenAI Image API. It has minimal system prompts, persistent storage of image generation records, and reasonable defaults that agent can override in each session. **Super easy to use!**
+  A super-easy-to-use AstrBot plugin that provides your agent with latest image generation capabilities through OpenAI Image API. It has minimal system prompts, persistent storage of image generation records, and reasonable defaults that agent can override in each session. Supports gpt-image-2.6-sunburst and gpt-image-2.6-flare.
 
   Requires an OPENAI_API_KEY.
 version: v0.1.0

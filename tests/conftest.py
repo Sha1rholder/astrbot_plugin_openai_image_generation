@@ -21,7 +21,7 @@ api_module = importlib.import_module(f"{ROOT.name}.image_api")
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
-    """Create an API instance with isolated key files and no environment API key."""
+    """Create an API instance with isolated metadata and no environment API key."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     (tmp_path / "metadata.yaml").write_bytes((ROOT / "metadata.yaml").read_bytes())
     return api_module.ImageAPI({}, tmp_path)

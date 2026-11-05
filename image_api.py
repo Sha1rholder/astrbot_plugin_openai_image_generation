@@ -166,17 +166,8 @@ class ImageAPI:
                 or os.getenv("OPENAI_API_KEY", "").strip()
             )
             if not api_key:
-                for key_file in (
-                    self.plugin_dir / "OPENAI_API_KEY",
-                    self.plugin_dir / ".local" / "OPENAI_API_KEY",
-                ):
-                    if key_file.is_file():
-                        api_key = key_file.read_text(encoding="utf-8").strip()
-                        if api_key:
-                            break
-            if not api_key:
                 raise ImageGenerationError(
-                    "Configure api_key in the plugin settings, or provide the OPENAI_API_KEY environment variable or key file."
+                    "Configure api_key in the plugin settings, or provide the OPENAI_API_KEY environment variable."
                 )
             base_url = (
                 str(self.config.get("base_url") or "https://api.openai.com/v1")

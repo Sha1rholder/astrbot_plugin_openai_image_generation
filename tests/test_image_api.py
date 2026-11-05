@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -303,30 +304,39 @@ def test_non_webp_output_is_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_missing_key_has_actionable_error(api, tmp_path):
-    """Verify missing credentials produce a configuration error before client creation."""
+@pytest.mark.parametrize("key_file", [None, "OPENAI_API_KEY", ".local/OPENAI_API_KEY"])
+async def test_missing_key_has_actionable_error(api, tmp_path, monkeypatch, key_file):
+    """Verify missing credentials fail before client creation even when key files exist."""
+    if key_file is not None:
+        path = api.plugin_dir / key_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("ignored-file-key\n", encoding="utf-8")
+    api.config["api_key"] = " \t"
+    monkeypatch.setenv("OPENAI_API_KEY", " \t")
+    create_client = Mock()
+    monkeypatch.setattr(api_module.httpx, "AsyncClient", create_client)
     payload, _ = api.prepare({"description": "A cat", "prompt": {"text": "cat"}})
-    with pytest.raises(ImageGenerationError, match="api_key"):
+    with pytest.raises(ImageGenerationError, match="api_key") as error:
         await api.generate(
             payload, [], tmp_path, {"description": "A cat", "prompt": {"text": "cat"}}
         )
+    assert "OPENAI_API_KEY environment variable" in str(error.value)
+    assert "key file" not in str(error.value)
+    create_client.assert_not_called()
     assert api.client is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["config", "environment", "file", "local"])
+@pytest.mark.parametrize("source", ["config", "environment"])
 async def test_key_sources(api, tmp_path, monkeypatch, webp, source):
     """Verify API keys are loaded from each supported source with expected precedence."""
     key = "test-key-not-a-real-secret"
     if source == "config":
-        api.config["api_key"] = key
+        api.config["api_key"] = " " + key + "\n"
         monkeypatch.setenv("OPENAI_API_KEY", "lower-priority")
-    elif source == "environment":
-        monkeypatch.setenv("OPENAI_API_KEY", key)
     else:
-        location = tmp_path / ".local" if source == "local" else tmp_path
-        location.mkdir(exist_ok=True)
-        (location / "OPENAI_API_KEY").write_text(key + "\n")
+        api.config["api_key"] = " \t"
+        monkeypatch.setenv("OPENAI_API_KEY", " " + key + "\n")
     captured = []
     client_type = httpx.AsyncClient
 

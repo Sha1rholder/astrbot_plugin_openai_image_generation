@@ -1,10 +1,10 @@
 {
   "api_key": {
-    "description": "OpenAI API key",
+    "description": "OPENAI_API_KEY",
     "type": "string",
     "secret": true,
     "default": "",
-    "hint": "If empty, read OPENAI_API_KEY from the environment, then the plugin's OPENAI_API_KEY or .local/OPENAI_API_KEY file."
+    "hint": "Enter the API key here, or leave empty to read the OPENAI_API_KEY environment variable."
   },
   "base_url": {
     "description": "Image API base URL",
