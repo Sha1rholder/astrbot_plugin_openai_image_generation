@@ -1,10 +1,13 @@
-name: astrbot_plugin_oai_image_api_webp_generate
-display_name: Generates WebP via OpenAI Image API
-desc: Generate lossless WebP images with GPT Image 2.6 via OpenAI Image API.
+name: astrbot_plugin_openai_image_generation
+display_name: OpenAI Image Generation
+desc: |
+  Provides your agent with latest image generation capabilities through OpenAI Image API. It has minimal system prompts, persistent storage of image generation records, and reasonable defaults that agent can override in each session. **Super easy to use!**
+
+  Requires an OPENAI_API_KEY.
 version: v0.1.0
 author: Sha1rholder
-repo: https://github.com/Sha1rholder/astrbot_plugin_oai_image_api_webp_generate
-astrbot_version: '>=4.29.4'
+repo: https://github.com/Sha1rholder/astrbot_plugin_openai_image_generation
+astrbot_version: ">=4.29.4"
 social_link: https://sha1.dev
 tags:
   - OpenAI
