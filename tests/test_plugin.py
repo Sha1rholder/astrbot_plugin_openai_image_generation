@@ -3,7 +3,7 @@ import base64
 import io
 import json
 import re
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -97,7 +97,9 @@ async def test_invalid_references_do_not_call_api(plugin, event):
         event, {"description": "A cat", "prompt": {"text": "cat", "images": [1]}}
     )
     assert "does not exist" in result
+    assert not plugin._tasks
     plugin.api.generate.assert_not_awaited()
+    plugin.context.send_message.assert_not_awaited()
     event.send.assert_not_awaited()
 
 
@@ -113,7 +115,8 @@ async def test_only_selected_references_are_loaded(
     result = await plugin.generate(
         event, {"description": "A cat", "prompt": {"text": "cat", "images": [2]}}
     )
-    assert "delivered 1" in result
+    assert "queued in the background" in result
+    await asyncio.gather(*plugin._tasks)
     loader.assert_awaited_once()
     assert plugin.api.generate.call_args.args[1] == ["selected-base64"]
 
@@ -128,6 +131,7 @@ async def test_unselected_attachments_are_not_loaded(
     monkeypatch.setattr(Image, "convert_to_base64", loader)
     plugin.api.generate = AsyncMock(return_value=[tmp_path / "output.webp"])
     await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
+    await asyncio.gather(*plugin._tasks)
     loader.assert_not_awaited()
     assert plugin.api.generate.call_args.args[1] == []
 
@@ -143,6 +147,9 @@ async def test_reference_loading_failure_prevents_api_call(plugin, event, monkey
     result = await plugin.generate(
         event, {"description": "A cat", "prompt": {"text": "cat", "images": [1]}}
     )
+    assert "queued in the background" in result
+    await asyncio.gather(*plugin._tasks)
+    result = plugin.context.send_message.call_args.args[1]
     assert "No Image API request" in result
     assert "private path" not in result
     plugin.api.generate.assert_not_awaited()
@@ -154,17 +161,20 @@ async def test_combined_delivery_failure_never_regenerates(plugin, event, tmp_pa
     plugin.api.generate = AsyncMock(
         return_value=[tmp_path / "one.webp", tmp_path / "two.webp"]
     )
-    event.send.side_effect = RuntimeError("private upstream response")
+    plugin.context.send_message.side_effect = RuntimeError("private upstream response")
+    plugin.logger = Mock()
     result = await plugin.generate(
         event,
         {"description": "A cat", "prompt": {"text": "cat"}, "number_of_images": 2},
     )
-    assert "Generated 2" in result and "delivery status is unknown" in result
-    assert str(plugin.output_dir) in result
-    assert "Do not regenerate" in result and "private upstream" not in result
-    assert "automatically resend" in result
+    assert "queued in the background" in result
+    await asyncio.gather(*plugin._tasks)
+    plugin.logger.warning.assert_called_once()
+    assert "Delivery status is unknown" in plugin.logger.warning.call_args.args[0]
+    assert "private upstream" not in str(plugin.logger.warning.call_args)
     plugin.api.generate.assert_awaited_once()
-    event.send.assert_awaited_once()
+    plugin.context.send_message.assert_awaited_once()
+    event.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -177,6 +187,9 @@ async def test_network_errors_do_not_retry(plugin, event, error):
     result = await plugin.generate(
         event, {"description": "A cat", "prompt": {"text": "cat"}}
     )
+    assert "queued in the background" in result
+    await asyncio.gather(*plugin._tasks)
+    result = plugin.context.send_message.call_args.args[1]
     assert "Do not automatically retry" in result
     assert "secret" not in result
     plugin.api.generate.assert_awaited_once()
@@ -187,10 +200,10 @@ async def test_network_errors_do_not_retry(plugin, event, error):
 async def test_cancellation_propagates(plugin, event):
     """Verify task cancellation propagates without attempting image delivery."""
     plugin.api.generate = AsyncMock(side_effect=asyncio.CancelledError)
+    await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
     with pytest.raises(asyncio.CancelledError):
-        await plugin.generate(
-            event, {"description": "A cat", "prompt": {"text": "cat"}}
-        )
+        await asyncio.gather(*plugin._tasks)
+    plugin.context.send_message.assert_not_awaited()
     event.send.assert_not_awaited()
 
 
@@ -255,12 +268,13 @@ async def test_astrbot_executor_to_http_to_delivery(
         assert generation_result is not None
         generation_content = generation_result.content[0]
         assert isinstance(generation_content, TextContent)
-        assert f"delivered {returned}" in generation_content.text
-        assert "with the description in one message" in generation_content.text
+        assert "queued in the background" in generation_content.text
+        await asyncio.gather(*plugin._tasks)
         assert len(requests) == 1
         assert json.loads(requests[0].content)["n"] == requested
-        event.send.assert_awaited_once()
-        message = event.send.call_args.args[0]
+        plugin.context.send_message.assert_awaited_once()
+        assert plugin.context.send_message.call_args.args[0] == event.unified_msg_origin
+        message = plugin.context.send_message.call_args.args[1]
         assert isinstance(message, plugin_module.MessageEventResult)
         assert len(message.chain) == returned + 1
         assert isinstance(message.chain[0], Plain)
@@ -279,14 +293,14 @@ async def test_retention_waits_for_delivery(plugin, event):
     """A second request must not prune files still being delivered by the first."""
     entered = asyncio.Event()
     release = asyncio.Event()
-    original_send = event.send
+    original_send = plugin.context.send_message
 
-    async def slow_send(result):
+    async def slow_send(origin, result):
         entered.set()
         await release.wait()
-        return await original_send(result)
+        return await original_send(origin, result)
 
-    event.send = slow_send
+    plugin.context.send_message = slow_send
     plugin.api.config["max_saved_requests"] = 1
     output = io.BytesIO()
     PILImage.new("RGB", (16, 16), "blue").save(output, "WEBP")
@@ -298,23 +312,165 @@ async def test_retention_waits_for_delivery(plugin, event):
         ),
     )
     arguments = {"prompt": {"text": "cat"}, "description": "cat"}
-    first = asyncio.create_task(plugin.generate(event, arguments))
-    second = None
+    await plugin.generate(event, arguments)
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
-        second = asyncio.create_task(plugin.generate(event, arguments))
+        result = await plugin.generate(event, arguments)
+        assert "queued in the background" in result
         await asyncio.sleep(0)
         assert (plugin.output_dir / "0" / "0.webp").is_file()
         assert not (plugin.output_dir / "1").exists()
         release.set()
-        assert all(
-            "delivered 1" in result for result in await asyncio.gather(first, second)
-        )
+        await asyncio.gather(*plugin._tasks)
         assert not (plugin.output_dir / "0").exists()
         assert (plugin.output_dir / "1" / "0.webp").is_file()
     finally:
         release.set()
-        await asyncio.gather(
-            first, *([second] if second else []), return_exceptions=True
-        )
+        await asyncio.gather(*plugin._tasks, return_exceptions=True)
         await plugin.terminate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_stage", ["reference", "api"])
+async def test_tool_returns_before_background_work_finishes(
+    plugin, event, monkeypatch, tmp_path, blocked_stage
+):
+    """The actual tool returns while slow work remains pending and later sends exactly once."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_work(*_args):
+        entered.set()
+        await release.wait()
+        return (
+            "reference-base64"
+            if blocked_stage == "reference"
+            else [tmp_path / "image.webp"]
+        )
+
+    reference = Image.fromBase64("original")
+    event.get_messages.return_value = [reference]
+    monkeypatch.setattr(
+        Image,
+        "convert_to_base64",
+        AsyncMock(side_effect=slow_work)
+        if blocked_stage == "reference"
+        else AsyncMock(return_value="reference-base64"),
+    )
+    plugin.api.generate = (
+        AsyncMock(side_effect=slow_work)
+        if blocked_stage == "api"
+        else AsyncMock(return_value=[tmp_path / "image.webp"])
+    )
+    arguments = {"description": "Original", "prompt": {"text": "cat", "images": [1]}}
+    context = ContextWrapper(
+        context=AstrAgentContext(context=plugin.context, event=event)
+    )
+    tool = plugin.context.add_llm_tools.call_args.args[1]
+    origin = event.unified_msg_origin
+    try:
+        result = await asyncio.wait_for(tool.call(context, **arguments), timeout=1)
+        assert "queued in the background" in result
+        assert "Reply to the user now" in result
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        plugin.context.send_message.assert_not_awaited()
+        assert len(plugin._tasks) == 1
+        # Later event or caller changes cannot redirect or rewrite the queued job.
+        event.unified_msg_origin = "webchat:FriendMessage:another-session"
+        event.get_messages.return_value = []
+        arguments["prompt"]["text"] = "changed"
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*plugin._tasks), timeout=1)
+        assert not plugin._tasks
+        assert plugin.api.generate.call_args.args[0]["prompt"] == "cat"
+        assert plugin.api.generate.call_args.args[3]["prompt"]["text"] == "cat"
+        plugin.context.send_message.assert_awaited_once()
+        assert plugin.context.send_message.call_args.args[0] == origin
+        event.send.assert_not_awaited()
+    finally:
+        release.set()
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
+async def test_terminate_cancels_running_and_queued_jobs_before_closing(plugin, event):
+    """Unloading cancels both active and queued work before closing the HTTP client."""
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def slow_generate(*_args):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def close():
+        assert cancelled.is_set()
+        assert not plugin._tasks
+
+    plugin.api.generate = AsyncMock(side_effect=slow_generate)
+    plugin.api.close = AsyncMock(side_effect=close)
+    arguments = {"description": "A cat", "prompt": {"text": "cat"}}
+    try:
+        await plugin.generate(event, arguments)
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        await plugin.generate(event, arguments)
+        tasks = list(plugin._tasks)
+        assert len(tasks) == 2
+        await asyncio.wait_for(plugin.terminate(), timeout=1)
+        assert all(task.cancelled() for task in tasks)
+        plugin.api.generate.assert_awaited_once()
+        plugin.api.close.assert_awaited_once()
+        plugin.context.send_message.assert_not_awaited()
+        assert "shutting down" in await plugin.generate(event, arguments)
+        assert not plugin._tasks
+    finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (plugin_module.ImageGenerationError("Invalid API key"), "Invalid API key"),
+        (OSError("private path"), "Could not read or save image files"),
+        (RuntimeError("private upstream response"), "unexpected error"),
+    ],
+)
+async def test_background_failures_notify_original_conversation(
+    plugin, event, error, expected
+):
+    """Background errors reach the user without leaking exception details or retrying."""
+    plugin.api.generate = AsyncMock(side_effect=error)
+    await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
+    await asyncio.gather(*plugin._tasks)
+    plugin.api.generate.assert_awaited_once()
+    plugin.context.send_message.assert_awaited_once()
+    origin, message = plugin.context.send_message.call_args.args
+    assert origin == event.unified_msg_origin
+    assert expected in message
+    assert "private" not in message
+    assert not plugin._tasks
+
+
+@pytest.mark.asyncio
+async def test_qq_official_uses_original_reply_event(plugin, event, tmp_path):
+    """QQ Official retains the event credentials required for image delivery."""
+    event.get_platform_name.return_value = "qq_official"
+    plugin.api.generate = AsyncMock(return_value=[tmp_path / "image.webp"])
+    await plugin.generate(event, {"description": "A cat", "prompt": {"text": "cat"}})
+    await asyncio.gather(*plugin._tasks)
+    event.send.assert_awaited_once()
+    plugin.context.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_arguments_do_not_enqueue(plugin, event):
+    """Invalid arguments are returned synchronously so the agent can correct them."""
+    result = await plugin.generate(
+        event, {"description": "A cat", "prompt": {"text": ""}}
+    )
+    assert "Invalid image arguments" in result
+    assert not plugin._tasks
+    plugin.context.send_message.assert_not_awaited()

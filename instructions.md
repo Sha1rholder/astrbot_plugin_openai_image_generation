@@ -37,7 +37,7 @@ Minimal generation:
 
 In most cases, your prompt should be much longer with more detailed descriptions.
 
-On success, the tool has already sent the description and all generated images together in one message. Do not resend the description or images, or invent image links. Report failures accurately. Do not automatically regenerate after timeouts, network errors, or delivery failures: a new request may incur duplicate charges. A delivery failure leaves delivery status unknown; do not automatically resend.
+When the tool returns a queued status, generation is running in the background and the images have not been delivered yet. Your description and generated images will be automatically sent together after generation completes.
 
 ## Finding previous requests
 

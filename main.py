@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -20,14 +21,11 @@ from .image_api import INPUT_SCHEMA, ImageAPI, ImageGenerationError
 PLUGIN_NAME = "astrbot_plugin_oai_image_api_webp_generate"
 GENERATION_TOOL_NAME = "oai_image_api_webp_generate"
 INSTRUCTIONS_TOOL_NAME = "get_oai_image_api_webp_generate_instructions"
-SYSTEM_HINT = f"Call {INSTRUCTIONS_TOOL_NAME} first to generate static raster images with OpenAI Image API."
+SYSTEM_HINT = f"Call {INSTRUCTIONS_TOOL_NAME} to generate static raster images with OpenAI Image API."
 INSTRUCTIONS_TOOL_DESCRIPTION = (
     "Read image generation instructions and available reference image indices."
 )
-GENERATION_TOOL_DESCRIPTION = (
-    "Generate WebP images and automatically send the description and all images in one message. "
-    f"Read {INSTRUCTIONS_TOOL_NAME} first."
-)
+GENERATION_TOOL_DESCRIPTION = f"generate static raster images with OpenAI Image API. Read {INSTRUCTIONS_TOOL_NAME} first."
 GUIDE = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
 
 
@@ -74,6 +72,8 @@ class WebpImagePlugin(Star):
         """Initialize the API and output directory, then register both image tools."""
         super().__init__(context)
         self._generation_lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._stopping = False
         self.api = ImageAPI(config, Path(__file__).parent)
         self.output_dir = StarTools.get_data_dir(PLUGIN_NAME) / "images"
         self.context.add_llm_tools(ImageInstructionsTool(self), GenerateWebpTool(self))
@@ -129,73 +129,149 @@ class WebpImagePlugin(Star):
             req.system_prompt += "\n" + SYSTEM_HINT
 
     async def generate(self, event: AstrMessageEvent, arguments: dict[str, Any]) -> str:
-        """Serialize generation and delivery so retention cannot delete pending images."""
+        """Enqueue a request without waiting for reference loading or generation.
+
+        Args:
+            event: Original message and destination for the background result.
+            arguments: Model arguments to validate and snapshot before enqueueing.
+
+        Returns:
+            A queued acknowledgement or an immediate validation error.
+        """
+        if self._stopping:
+            return "The image plugin is shutting down. No image task was queued."
+        arguments = deepcopy(arguments)
+        try:
+            payload, indices = self.api.prepare(arguments)
+        except ImageGenerationError as exc:
+            return str(exc)
+        references = self.reference_images(event)
+        if any(index > len(references) for index in indices):
+            return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
+        selected = [(index, references[index - 1]) for index in indices]
+        task = asyncio.create_task(
+            self._run_generation(
+                event, arguments, payload, selected, event.unified_msg_origin
+            )
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return (
+            "Image generation queued in the background. Reply to the user now with a brief acknowledgement; "
+            "do not wait or call the tool again for this request. The description and images will be sent "
+            "automatically to this conversation when ready, or a failure notification if generation fails. "
+            "The images have not been generated or delivered yet."
+        )
+
+    async def _run_generation(
+        self,
+        event: AstrMessageEvent,
+        arguments: dict[str, Any],
+        payload: dict[str, Any],
+        references: list[tuple[int, Image]],
+        origin: str,
+    ) -> None:
+        """Serialize generation and delivery to protect pending files from retention.
+
+        Args:
+            event: Original event used for result builders and QQ reply credentials.
+            arguments: Snapshot of the original tool arguments.
+            payload: Validated Image API payload.
+            references: Selected reference indices and attachments.
+            origin: Original conversation identifier for proactive delivery.
+        """
         async with self._generation_lock:
-            return await self._generate(event, arguments)
+            try:
+                message = await self._generate(event, arguments, payload, references)
+            except Exception as exc:
+                self.logger.error(
+                    "Background image generation failed: %s", type(exc).__name__
+                )
+                message = event.plain_result(
+                    "Image generation encountered an unexpected error. Completion is unknown. "
+                    "Check plugin logs. Do not automatically retry."
+                )
+            try:
+                # QQ Official requires the original event for reply credentials.
+                # Other adapters use proactive delivery after the agent turn ends.
+                if event.get_platform_name() == "qq_official":
+                    await event.send(message)
+                elif not await self.context.send_message(origin, message):
+                    raise RuntimeError("Destination platform is unavailable")
+            except Exception as exc:
+                self.logger.warning(
+                    "Background image result delivery failed: %s. Delivery status is unknown; "
+                    "no automatic retry. Generated files, if any, remain in %s",
+                    type(exc).__name__,
+                    self.output_dir,
+                )
 
     async def _generate(
-        self, event: AstrMessageEvent, arguments: dict[str, Any]
-    ) -> str:
-        """Generate images and report delivery separately from API success.
+        self,
+        event: AstrMessageEvent,
+        arguments: dict[str, Any],
+        payload: dict[str, Any],
+        references: list[tuple[int, Image]],
+    ) -> MessageEventResult:
+        """Prepare a background success or failure message without retrying generation.
 
         Args:
             event: Destination and source of reference images.
             arguments: Arguments supplied by the language model.
+            payload: Validated Image API payload.
+            references: Selected reference indices and attachment snapshots.
 
         Returns:
-            Delivery status or an actionable error, without image bytes or secrets.
+            A combined image message or a safe failure notification.
         """
         try:
-            payload, indices = self.api.prepare(arguments)
-            references = self.reference_images(event)
-            if any(index > len(references) for index in indices):
-                return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
             # Resolve only explicitly selected attachments, never model-supplied paths.
             encoded_images: list[str] = []
-            for index in indices:
+            for index, reference in references:
                 try:
                     encoded = await asyncio.wait_for(
-                        references[index - 1].convert_to_base64(), timeout=30
+                        reference.convert_to_base64(), timeout=30
                     )
                     encoded_images.append(encoded)
                 except Exception as exc:
                     self.logger.warning(
                         "Reference image loading failed: %s", type(exc).__name__
                     )
-                    return f"Could not read reference image {index}. Ask the user to resend it. No Image API request was made."
+                    return event.plain_result(
+                        f"Could not read reference image {index}. Please resend it. No Image API request was made."
+                    )
             paths = await self.api.generate(
                 payload, encoded_images, self.output_dir, arguments
             )
         except ImageGenerationError as exc:
-            return str(exc)
+            return event.plain_result(str(exc))
         except httpx.TimeoutException:
-            return "Image request timed out. The server may still be generating. Do not automatically retry: it may incur duplicate charges."
+            return event.plain_result(
+                "Image request timed out. The server may still be generating. Do not automatically retry: it may incur duplicate charges."
+            )
         except httpx.RequestError:
-            return "Image service connection failed; completion is unknown. Check the network. Do not automatically retry."
+            return event.plain_result(
+                "Image service connection failed; completion is unknown. Check the network. Do not automatically retry."
+            )
         except OSError as exc:
             self.logger.error("Image storage failed: %s", type(exc).__name__)
-            return "Could not read or save image files. Check disk space and plugin data directory permissions. Do not automatically regenerate."
+            return event.plain_result(
+                "Could not read or save image files. Check disk space and plugin data directory permissions."
+            )
 
-        try:
-            await event.send(
-                event.chain_result(
-                    [
-                        Plain(arguments["description"]),
-                        *(Image.fromFileSystem(str(path)) for path in paths),
-                    ]
-                )
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Generated image delivery failed: %s", type(exc).__name__
-            )
-            return (
-                f"Generated {len(paths)} WebP images, but sending the combined description and images failed; delivery status is unknown. "
-                f"Files are saved in {self.output_dir}. Check platform permissions and format support. "
-                "Do not regenerate, automatically resend, or claim all images were delivered."
-            )
-        return f"Generated and delivered {len(paths)} WebP images with the description in one message. Do not send the description or images again or embed them in Markdown."
+        return event.chain_result(
+            [
+                Plain(arguments["description"]),
+                *(Image.fromFileSystem(str(path)) for path in paths),
+            ]
+        )
 
     async def terminate(self) -> None:
-        """Close the image API client when the plugin is unloaded."""
+        """Cancel and await background jobs before closing the shared HTTP client."""
+        self._stopping = True
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
         await self.api.close()

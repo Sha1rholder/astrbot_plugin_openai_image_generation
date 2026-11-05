@@ -1,27 +1,27 @@
 {
-  "api_key": {
-    "description": "OPENAI_API_KEY",
-    "type": "string",
-    "secret": true,
-    "default": "",
-    "hint": "Enter the API key here, or leave empty to read the OPENAI_API_KEY environment variable."
-  },
-  "base_url": {
-    "description": "Image API base URL",
-    "type": "string",
-    "default": "https://api.openai.com/v1",
-    "hint": "Include /v1, not /images/generations. Reference images require JSON support for /images/edits."
-  },
-  "timeout_seconds": {
-    "description": "API request timeout in seconds",
-    "type": "int",
-    "default": 300,
-    "hint": "Set AstrBot's tool timeout higher, allowing time for reference loading and delivery. Failed requests are not automatically retried."
-  },
-  "max_saved_requests": {
-    "description": "Maximum number of saved image generation requests",
-    "type": "int",
-    "default": 10,
-    "hint": "A positive integer. Images from each request are saved in the same numbered directory. After successfully saving request N, directories numbered less than or equal to N minus this limit are deleted."
-  }
+	"api_key": {
+		"description": "OPENAI_API_KEY",
+		"type": "string",
+		"secret": true,
+		"default": "",
+		"hint": "Enter the API key here, or leave empty to read the OPENAI_API_KEY environment variable."
+	},
+	"base_url": {
+		"description": "Image API base URL",
+		"type": "string",
+		"default": "https://api.openai.com/v1",
+		"hint": "Include /v1, not /images/generations. Reference images require JSON support for /images/edits."
+	},
+	"timeout_seconds": {
+		"description": "API request timeout in seconds",
+		"type": "int",
+		"default": 300,
+		"hint": "Timeout for the background Image API request. The tool returns immediately; no increase to AstrBot tool timeout is needed. Failed requests are not automatically retried."
+	},
+	"max_saved_requests": {
+		"description": "Maximum number of saved image generation requests",
+		"type": "int",
+		"default": 10,
+		"hint": "A positive integer. Images from each request are saved in the same numbered directory. After successfully saving request N, directories numbered less than or equal to N minus this limit are deleted."
+	}
 }

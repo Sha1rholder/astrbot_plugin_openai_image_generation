@@ -32,6 +32,7 @@ def plugin(tmp_path, monkeypatch):
     """Create a plugin with mocked AstrBot context and a temporary data directory."""
     monkeypatch.setattr(plugin_module.StarTools, "get_data_dir", lambda _: tmp_path)
     context = create_autospec(plugin_module.Context, instance=True)
+    context.send_message.return_value = True
     return plugin_module.WebpImagePlugin(context, {})
 
 
@@ -40,6 +41,8 @@ def event():
     """Create a mock message event with empty attachments and transparent result builders."""
     message_event = create_autospec(plugin_module.AstrMessageEvent, instance=True)
     message_event.get_messages.return_value = []
+    message_event.get_platform_name.return_value = "webchat"
+    message_event.unified_msg_origin = "webchat:FriendMessage:test-session"
     message_event.chain_result.side_effect = lambda components: components
     message_event.plain_result.side_effect = lambda text: text
     return message_event
