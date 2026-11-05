@@ -41,10 +41,10 @@ When the tool returns a queued status, generation is running in the background a
 
 ## Finding previous requests
 
-Search descriptions by keywords from the user's request in one command. Replace `ARCHIVE_DIR` with the image archive directory provided below:
+Search archived requests by keywords from the user's request in one command. Descriptions are stored in `request.yaml` as `request.description`. Replace `ARCHIVE_DIR` with the image archive directory provided below:
 
 ```bash
-rg -n -i -F -g description.txt -- 'keyword' 'ARCHIVE_DIR'
+rg -n -i -F -g request.yaml -- 'keyword' 'ARCHIVE_DIR'
 ```
 
-Each match gives the description and its request directory. That directory contains `0.webp`, `1.webp`, etc., and `request.yaml` with the original tool arguments. You can send the matching images or, if requested, `request.yaml` to user after finding them.
+Each match identifies a request directory. Read `request.yaml` to check the description and original tool arguments. The directory and request file are created as soon as the tool accepts the request; `0.webp`, `1.webp`, etc. are added after successful generation. Pending or failed requests may have no images. Check that images exist before sending them. You can send the matching images or, if requested, `request.yaml` to the user after finding them.

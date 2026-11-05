@@ -123,32 +123,11 @@ class ImageAPI:
         )
         return max(existing, default=-1) + 1
 
-    async def generate(
-        self,
-        payload: dict[str, Any],
-        references: list[str],
-        output_dir: Path,
-        arguments: dict[str, Any],
-    ) -> list[Path]:
-        """Call only Image API endpoints, with no automatic paid-request retries.
-
-        Args:
-            payload: A payload produced by prepare.
-            references: Base64 image attachments explicitly selected by the caller.
-            output_dir: Persistent directory for archived requests.
-            arguments: Original model tool arguments, preserved without API defaults.
-
-        Returns:
-            Paths to validated WebP outputs.
-
-        Raises:
-            ImageGenerationError: For invalid configuration, API errors or bad output.
-            httpx.RequestError: If the request cannot be completed.
-            OSError: If the output cannot be saved.
-        """
+    def create_request(self, output_dir: Path, arguments: dict[str, Any]) -> Path:
+        """Reserve a numbered directory and archive arguments before enqueueing."""
         arguments = deepcopy(arguments)
         self.prepare(arguments)
-        limit = self.storage_limit()
+        self.storage_limit()
         try:
             metadata = yaml.safe_load(
                 (self.plugin_dir / "metadata.yaml").read_text(encoding="utf-8")
@@ -160,6 +139,47 @@ class ImageAPI:
             raise ImageGenerationError(
                 "Cannot read the plugin version from metadata.yaml. No Image API request was made."
             ) from None
+        with STORAGE_LOCK:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            directory = output_dir / str(self.next_request_id(output_dir))
+            if directory.exists() or directory.is_symlink():
+                raise FileExistsError(f"Request directory already exists: {directory}")
+            with tempfile.TemporaryDirectory(
+                prefix=".pending-", dir=output_dir
+            ) as temporary:
+                staging = Path(temporary)
+                (staging / "request.yaml").write_text(
+                    f"# yaml-language-server: $schema={REQUEST_SCHEMA['$id']}\n"
+                    + yaml.safe_dump(
+                        {"plugin_version": version, "request": arguments},
+                        allow_unicode=True,
+                        sort_keys=False,
+                    ),
+                    encoding="utf-8",
+                )
+                staging.replace(directory)
+            return directory
+
+    async def generate(
+        self,
+        payload: dict[str, Any],
+        references: list[str],
+        output_dir: Path,
+        arguments: dict[str, Any],
+        request_dir: Path | None = None,
+    ) -> list[Path]:
+        """Call Image API once and save outputs in the reserved request directory.
+
+        Direct callers may omit request_dir to archive arguments before the HTTP call.
+        Failed requests retain their archive for inspection.
+        """
+        arguments = deepcopy(arguments)
+        self.prepare(arguments)
+        limit = self.storage_limit()
+        if request_dir is None:
+            request_dir = await asyncio.to_thread(
+                self.create_request, output_dir, arguments
+            )
         if self.client is None:
             api_key = (
                 str(self.config.get("api_key") or "").strip()
@@ -207,7 +227,6 @@ class ImageAPI:
         if references:
             endpoint = "images/edits"
             body["images"] = await asyncio.to_thread(self.reference_payload, references)
-        request_id = await asyncio.to_thread(self.next_request_id, output_dir)
         response = await self.client.post(endpoint, json=body)
         if not response.is_success:
             explanation = {
@@ -226,16 +245,15 @@ class ImageAPI:
             raise ImageGenerationError(
                 "The image service returned invalid JSON. Do not automatically retry."
             ) from None
-        return await asyncio.to_thread(
-            self.save_images,
-            result,
-            output_dir,
-            payload["n"],
-            arguments,
-            version,
-            limit,
-            request_id,
+        paths = await asyncio.to_thread(
+            self.save_images, result, request_dir, payload["n"]
         )
+        # Creation never prunes: older requests may still be generating or sending.
+        # The plugin serializes generation and delivery before reaching this point.
+        await asyncio.to_thread(
+            self.prune_requests, output_dir, int(request_dir.name) - limit
+        )
+        return paths
 
     @staticmethod
     def reference_payload(references: list[str]) -> list[dict[str, str]]:
@@ -278,23 +296,15 @@ class ImageAPI:
     @staticmethod
     def save_images(
         result: object,
-        output_dir: Path,
+        request_dir: Path,
         requested: int,
-        arguments: dict[str, Any],
-        plugin_version: str,
-        max_saved_requests: int = 10,
-        request_id: int | None = None,
     ) -> list[Path]:
         """Validate all images, then save the API bytes without recompression.
 
         Args:
             result: The decoded API response.
-            output_dir: Directory for generated images.
+            request_dir: Existing numbered directory containing request.yaml.
             requested: Maximum permitted response count.
-            arguments: Original tool arguments, including the required description.
-            plugin_version: Version read from the plugin metadata.
-            max_saved_requests: Positive request retention limit.
-            request_id: ID selected before the HTTP request, or derived for direct saves.
 
         Returns:
             Paths of the generated WebP files.
@@ -303,7 +313,6 @@ class ImageAPI:
             ImageGenerationError: If the service did not return valid WebP images.
             OSError: If files cannot be written.
         """
-        ImageAPI.prepare(arguments)
         data = result.get("data") if isinstance(result, dict) else None
         if not isinstance(data, list) or not 1 <= len(data) <= requested:
             raise ImageGenerationError(
@@ -331,52 +340,43 @@ class ImageAPI:
                 raise ImageGenerationError(
                     "The image service did not return valid WebP images. Do not automatically retry."
                 ) from None
-        # Stage the complete request so failed writes never expose a partial record.
-        # The plugin serializes requests through delivery; this lock also protects
-        # direct saves from concurrent publication and pruning in this process.
+        # Stage all image writes while preserving the already published request.
         with STORAGE_LOCK:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            if request_id is None:
-                request_id = ImageAPI.next_request_id(output_dir)
-            directory = output_dir / str(request_id)
-            if directory.exists() or directory.is_symlink():
-                raise FileExistsError(f"Request directory already exists: {directory}")
+            paths = [request_dir / f"{index}.webp" for index in range(len(decoded))]
+            if any(path.exists() or path.is_symlink() for path in paths):
+                raise FileExistsError(f"Request images already exist: {request_dir}")
             with tempfile.TemporaryDirectory(
-                prefix=".pending-", dir=output_dir
+                prefix=".pending-", dir=request_dir
             ) as temporary:
                 staging = Path(temporary)
                 for index, raw in enumerate(decoded):
                     (staging / f"{index}.webp").write_bytes(raw)
-                (staging / "description.txt").write_text(
-                    arguments["description"], encoding="utf-8"
-                )
-                (staging / "request.yaml").write_text(
-                    f"# yaml-language-server: $schema={REQUEST_SCHEMA['$id']}\n"
-                    + yaml.safe_dump(
-                        {"plugin_version": plugin_version, "request": arguments},
-                        allow_unicode=True,
-                        sort_keys=False,
-                    ),
-                    encoding="utf-8",
-                )
-                staging.replace(directory)
-            ImageAPI.prune_requests(output_dir, request_id - max_saved_requests)
-            return [directory / f"{index}.webp" for index in range(len(decoded))]
+                published: list[Path] = []
+                try:
+                    for path in paths:
+                        (staging / path.name).replace(path)
+                        published.append(path)
+                except OSError:
+                    for path in published:
+                        path.unlink(missing_ok=True)
+                    raise
+            return paths
 
     @staticmethod
     def prune_requests(output_dir: Path, cutoff: int) -> None:
         """Delete canonical numeric request directories at or below the cutoff."""
-        for directory in output_dir.iterdir():
-            name = directory.name
-            if (
-                name.isascii()
-                and name.isdecimal()
-                and str(int(name)) == name
-                and int(name) <= cutoff
-                and not directory.is_symlink()
-                and directory.is_dir()
-            ):
-                shutil.rmtree(directory)
+        with STORAGE_LOCK:
+            for directory in output_dir.iterdir():
+                name = directory.name
+                if (
+                    name.isascii()
+                    and name.isdecimal()
+                    and str(int(name)) == name
+                    and int(name) <= cutoff
+                    and not directory.is_symlink()
+                    and directory.is_dir()
+                ):
+                    shutil.rmtree(directory)
 
     async def close(self) -> None:
         """Close an existing HTTP client and clear it so repeated cleanup is safe."""

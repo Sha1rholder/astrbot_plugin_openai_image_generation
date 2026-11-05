@@ -244,6 +244,14 @@ async def test_errors_do_not_leak_response_or_retry(api, tmp_path, status):
         assert str(status) in str(error.value)
         assert "secret" not in str(error.value)
         assert len(attempts) == 1
+        directory = tmp_path / "0"
+        assert (
+            yaml.safe_load((directory / "request.yaml").read_text())["request"][
+                "description"
+            ]
+            == "A cat"
+        )
+        assert {path.name for path in directory.iterdir()} == {"request.yaml"}
     finally:
         await api.close()
 
@@ -259,17 +267,18 @@ async def test_errors_do_not_leak_response_or_retry(api, tmp_path, status):
         {"data": [{"url": "https://example.invalid/x"}]},
     ],
 )
-def test_invalid_responses_leave_no_files(tmp_path, result):
-    """Verify invalid API responses are rejected before creating output files."""
+def test_invalid_responses_preserve_request(api, tmp_path, result):
+    """Invalid API responses leave the original request without any output images."""
+    directory = api.create_request(
+        tmp_path / "out", {"description": "A cat", "prompt": {"text": "cat"}}
+    )
     with pytest.raises(ImageGenerationError):
         ImageAPI.save_images(
             result,
-            tmp_path / "out",
+            directory,
             1,
-            {"description": "A cat", "prompt": {"text": "cat"}},
-            "v0.1.0",
         )
-    assert not (tmp_path / "out").exists()
+    assert {path.name for path in directory.iterdir()} == {"request.yaml"}
 
 
 def test_invalid_second_image_does_not_save_first(tmp_path, webp):
@@ -279,8 +288,6 @@ def test_invalid_second_image_does_not_save_first(tmp_path, webp):
             {"data": [{"b64_json": base64.b64encode(webp).decode()}, {}]},
             tmp_path / "out",
             2,
-            {"description": "A cat", "prompt": {"text": "cat"}},
-            "v0.1.0",
         )
     assert not (tmp_path / "out").exists()
 
@@ -295,8 +302,6 @@ def test_non_webp_output_is_rejected(tmp_path):
             {"data": [{"b64_json": encoded}]},
             tmp_path / "out",
             1,
-            {"description": "A cat", "prompt": {"text": "cat"}},
-            "v0.1.0",
         )
     assert ImageAPI.reference_payload([encoded])[0]["image_url"].startswith(
         "data:image/png;base64,"
@@ -424,7 +429,8 @@ async def test_invalid_retention_prevents_request(api, tmp_path, limit):
     assert api.client is None
 
 
-def test_request_archive_and_numeric_retention(tmp_path, webp):
+@pytest.mark.asyncio
+async def test_request_archive_and_numeric_retention(api, tmp_path, webp):
     import shutil
 
     arguments = {
@@ -434,13 +440,18 @@ def test_request_archive_and_numeric_retention(tmp_path, webp):
         "number_of_images": 2,
     }
     result = {"data": [{"b64_json": base64.b64encode(webp).decode()}] * 2}
+    (api.plugin_dir / "metadata.yaml").write_text("version: v9.8.7\n")
+    output = tmp_path / "images"
+    api.client = httpx.AsyncClient(
+        base_url="https://example.invalid/v1/",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=result)),
+    )
+    payload, _ = api.prepare(arguments)
     for number in range(12):
-        paths = ImageAPI.save_images(result, tmp_path, 2, arguments, "v9.8.7")
-        assert paths == [tmp_path / str(number) / f"{i}.webp" for i in range(2)]
+        paths = await api.generate(payload, [], output, arguments)
+        assert paths == [output / str(number) / f"{i}.webp" for i in range(2)]
         assert all(p.read_bytes() == webp for p in paths)
-        assert (paths[0].parent / "description.txt").read_text() == arguments[
-            "description"
-        ]
+        assert not (paths[0].parent / "description.txt").exists()
         archive_text = (paths[0].parent / "request.yaml").read_text()
         assert archive_text.splitlines()[0] == (
             "# yaml-language-server: $schema=" + api_module.REQUEST_SCHEMA["$id"]
@@ -452,26 +463,31 @@ def test_request_archive_and_numeric_retention(tmp_path, webp):
             "plugin_version": "v9.8.7",
             "request": arguments,
         }
-    assert {p.name for p in tmp_path.iterdir() if p.is_dir()} == {
+    assert {p.name for p in output.iterdir() if p.is_dir()} == {
         str(i) for i in range(2, 12)
     }
     # Reducing the limit cleans all directories below the numeric cutoff.
-    paths = ImageAPI.save_images(result, tmp_path, 2, arguments, "v9.8.7", 1)
+    api.config["max_saved_requests"] = 1
+    paths = await api.generate(payload, [], output, arguments)
     assert paths[0].parent.name == "12"
-    assert {p.name for p in tmp_path.iterdir() if p.is_dir()} == {"12"}
+    assert {p.name for p in output.iterdir() if p.is_dir()} == {"12"}
     # Clearing all request directories resets the next ID to zero.
     shutil.rmtree(paths[0].parent)
-    paths = ImageAPI.save_images(result, tmp_path, 2, arguments, "v9.8.7", 1)
+    paths = await api.generate(payload, [], output, arguments)
     assert paths[0].parent.name == "0"
-    assert not (tmp_path / ".next_request_id").exists()
+    assert not (output / ".next_request_id").exists()
+
+    await api.close()
 
 
-def test_storage_failure_keeps_previous_request(tmp_path, webp, monkeypatch):
+def test_storage_failure_keeps_previous_request(api, tmp_path, webp, monkeypatch):
     from pathlib import Path
 
     arguments = {"prompt": {"text": "cat"}, "description": "cat"}
     result = {"data": [{"b64_json": base64.b64encode(webp).decode()}]}
-    ImageAPI.save_images(result, tmp_path, 1, arguments, "v1", 1)
+    output = tmp_path / "images"
+    directory = api.create_request(output, arguments)
+    ImageAPI.save_images(result, directory, 1)
     original = Path.write_text
 
     def fail_metadata(path, *args, **kwargs):
@@ -481,9 +497,33 @@ def test_storage_failure_keeps_previous_request(tmp_path, webp, monkeypatch):
 
     monkeypatch.setattr(Path, "write_text", fail_metadata)
     with pytest.raises(OSError):
-        ImageAPI.save_images(result, tmp_path, 1, arguments, "v1", 1)
-    assert {p.name for p in tmp_path.iterdir()} == {"0"}
-    assert (tmp_path / "0" / "0.webp").read_bytes() == webp
+        api.create_request(output, arguments)
+    assert {p.name for p in output.iterdir()} == {"0"}
+    assert (output / "0" / "0.webp").read_bytes() == webp
+
+
+@pytest.mark.parametrize("operation", ["write_bytes", "replace"])
+def test_image_storage_failure_preserves_request(
+    api, tmp_path, webp, monkeypatch, operation
+):
+    from pathlib import Path
+
+    arguments = {"prompt": {"text": "cat"}, "description": "cat"}
+    directory = api.create_request(tmp_path / "images", arguments)
+    archive = (directory / "request.yaml").read_bytes()
+    original = getattr(Path, operation)
+
+    def fail_second_image(path, *args, **kwargs):
+        if path.name == "1.webp":
+            raise OSError("disk full")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, operation, fail_second_image)
+    result = {"data": [{"b64_json": base64.b64encode(webp).decode()}] * 2}
+    with pytest.raises(OSError):
+        ImageAPI.save_images(result, directory, 2)
+    assert {path.name for path in directory.iterdir()} == {"request.yaml"}
+    assert (directory / "request.yaml").read_bytes() == archive
 
 
 def test_cleanup_ignores_unrelated_files_and_symlinks(tmp_path):
@@ -542,6 +582,11 @@ async def test_number_is_selected_before_http_request(api, tmp_path, webp):
     payload, _ = api.prepare(arguments)
 
     def respond(_request):
+        assert (
+            yaml.safe_load((output / "3" / "request.yaml").read_text())["request"]
+            == arguments
+        )
+        assert not (output / "3" / "0.webp").exists()
         # A change during generation must not alter the already selected ID.
         (output / "7").mkdir()
         return httpx.Response(

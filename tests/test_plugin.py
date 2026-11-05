@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+import yaml
 from conftest import plugin_module
 from mcp.types import TextContent
 from PIL import Image as PILImage
@@ -319,7 +320,8 @@ async def test_retention_waits_for_delivery(plugin, event):
         assert "queued in the background" in result
         await asyncio.sleep(0)
         assert (plugin.output_dir / "0" / "0.webp").is_file()
-        assert not (plugin.output_dir / "1").exists()
+        assert (plugin.output_dir / "1" / "request.yaml").is_file()
+        assert not (plugin.output_dir / "1" / "0.webp").exists()
         release.set()
         await asyncio.gather(*plugin._tasks)
         assert not (plugin.output_dir / "0").exists()
@@ -371,6 +373,12 @@ async def test_tool_returns_before_background_work_finishes(
     try:
         result = await asyncio.wait_for(tool.call(context, **arguments), timeout=1)
         assert "queued in the background" in result
+        directory = plugin.output_dir / "0"
+        assert (
+            yaml.safe_load((directory / "request.yaml").read_text())["request"]
+            == arguments
+        )
+        assert {path.name for path in directory.iterdir()} == {"request.yaml"}
         assert "Reply to the user now" in result
         await asyncio.wait_for(entered.wait(), timeout=1)
         plugin.context.send_message.assert_not_awaited()
@@ -384,6 +392,7 @@ async def test_tool_returns_before_background_work_finishes(
         assert not plugin._tasks
         assert plugin.api.generate.call_args.args[0]["prompt"] == "cat"
         assert plugin.api.generate.call_args.args[3]["prompt"]["text"] == "cat"
+        assert plugin.api.generate.call_args.args[4] == directory
         plugin.context.send_message.assert_awaited_once()
         assert plugin.context.send_message.call_args.args[0] == origin
         event.send.assert_not_awaited()
@@ -474,3 +483,20 @@ async def test_invalid_arguments_do_not_enqueue(plugin, event):
     assert "Invalid image arguments" in result
     assert not plugin._tasks
     plugin.context.send_message.assert_not_awaited()
+    assert not plugin.output_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_archive_failure_does_not_enqueue(plugin, event, monkeypatch):
+    """The tool must not acknowledge a queued job when its request cannot be saved."""
+    monkeypatch.setattr(
+        plugin.api, "create_request", Mock(side_effect=OSError("private path"))
+    )
+    plugin.api.generate = AsyncMock()
+    result = await plugin.generate(
+        event, {"description": "A cat", "prompt": {"text": "cat"}}
+    )
+    assert "No image task was queued" in result
+    assert "private path" not in result
+    assert not plugin._tasks
+    plugin.api.generate.assert_not_awaited()

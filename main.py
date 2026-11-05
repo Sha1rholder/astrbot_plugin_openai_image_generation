@@ -73,6 +73,7 @@ class WebpImagePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         """Initialize the API and output directory, then register both image tools."""
         super().__init__(context)
+        self._enqueue_lock = asyncio.Lock()
         self._generation_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
@@ -151,13 +152,35 @@ class WebpImagePlugin(Star):
         if any(index > len(references) for index in indices):
             return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
         selected = [(index, references[index - 1]) for index in indices]
-        task = asyncio.create_task(
-            self._run_generation(
-                event, arguments, payload, selected, event.unified_msg_origin
+        origin = event.unified_msg_origin
+        # Keep reservation order and background execution order identical so later
+        # requests cannot prune an earlier request that has not run yet.
+        async with self._enqueue_lock:
+            if self._stopping:
+                return "The image plugin is shutting down. No image task was queued."
+            try:
+                request_dir = await asyncio.to_thread(
+                    self.api.create_request, self.output_dir, arguments
+                )
+            except ImageGenerationError as exc:
+                return str(exc)
+            except OSError as exc:
+                self.logger.error(
+                    "Image request storage failed: %s", type(exc).__name__
+                )
+                return (
+                    "Could not save the image request. Check disk space and plugin data directory permissions. "
+                    "No image task was queued."
+                )
+            if self._stopping:
+                return "The image plugin is shutting down. No image task was queued."
+            task = asyncio.create_task(
+                self._run_generation(
+                    event, arguments, payload, selected, origin, request_dir
+                )
             )
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
         return (
             "Image generation queued in the background. Reply to the user now with a brief acknowledgement; "
             "do not wait or call the tool again for this request. The description and images will be sent "
@@ -172,6 +195,7 @@ class WebpImagePlugin(Star):
         payload: dict[str, Any],
         references: list[tuple[int, Image]],
         origin: str,
+        request_dir: Path,
     ) -> None:
         """Serialize generation and delivery to protect pending files from retention.
 
@@ -181,10 +205,13 @@ class WebpImagePlugin(Star):
             payload: Validated Image API payload.
             references: Selected reference indices and attachments.
             origin: Original conversation identifier for proactive delivery.
+            request_dir: Numbered directory reserved before the tool acknowledgement.
         """
         async with self._generation_lock:
             try:
-                message = await self._generate(event, arguments, payload, references)
+                message = await self._generate(
+                    event, arguments, payload, references, request_dir
+                )
             except Exception as exc:
                 self.logger.error(
                     "Background image generation failed: %s", type(exc).__name__
@@ -214,6 +241,7 @@ class WebpImagePlugin(Star):
         arguments: dict[str, Any],
         payload: dict[str, Any],
         references: list[tuple[int, Image]],
+        request_dir: Path,
     ) -> MessageEventResult:
         """Prepare a background success or failure message without retrying generation.
 
@@ -222,6 +250,7 @@ class WebpImagePlugin(Star):
             arguments: Arguments supplied by the language model.
             payload: Validated Image API payload.
             references: Selected reference indices and attachment snapshots.
+            request_dir: Existing directory containing the original request.
 
         Returns:
             A combined image message or a safe failure notification.
@@ -243,7 +272,7 @@ class WebpImagePlugin(Star):
                         f"Could not read reference image {index}. Please resend it. No Image API request was made."
                     )
             paths = await self.api.generate(
-                payload, encoded_images, self.output_dir, arguments
+                payload, encoded_images, self.output_dir, arguments, request_dir
             )
         except ImageGenerationError as exc:
             return event.plain_result(str(exc))

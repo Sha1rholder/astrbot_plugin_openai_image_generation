@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/Sha1rholder/astrbot_plugin_openai_image_generation/main/request.schema.json",
   "title": "Archived image generation tool request",
-  "description": "Format of request.yaml saved by astrbot_plugin_openai_image_generation. Each numbered request directory also contains description.txt and zero-based WebP image files. Interpret the request using the recorded plugin version; this schema describes the current tool contract.",
+  "description": "Format of request.yaml saved by astrbot_plugin_openai_image_generation. Each numbered request directory is created when the tool accepts the request, with zero-based WebP image files added after successful generation. Interpret the request using the recorded plugin version; this schema describes the current tool contract.",
   "type": "object",
   "properties": {
     "plugin_version": {
@@ -40,7 +40,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Short description of the expected images, automatically sent along with the generated images to user and stored verbatim in description.txt.",
+          "description": "Short description of the expected images. Automatically sent along with the generated images to user.",
           "minLength": 1,
           "maxLength": 1000
         },
