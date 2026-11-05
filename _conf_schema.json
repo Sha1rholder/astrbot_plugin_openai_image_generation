@@ -23,5 +23,17 @@
 		"type": "int",
 		"default": 10,
 		"hint": "Before each API request, if total archive file size exceeds this limit, delete oldest request directories until below it. Current and queued requests are protected. New images may exceed the limit until the next request."
+	},
+	"user_window_minutes": {
+		"description": "Per-user sliding window (minutes)",
+		"type": "int",
+		"default": 360,
+		"hint": "Nonnegative integer. Default: 360 minutes. Set to 0 to skip the sliding-window quota check."
+	},
+	"user_max_images": {
+		"description": "Maximum images per user in the sliding window",
+		"type": "int",
+		"default": 5,
+		"hint": "Nonnegative integer. Default: 5 images. Counts requested images, including pending and failed jobs. A quota of 0 rejects requests through the normal quota check; the tool remains available. Ignored when the window is 0. Rejected requests are not recorded."
 	}
 }

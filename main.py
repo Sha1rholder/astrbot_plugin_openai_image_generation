@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+import yaml
 
 from astrbot.api import AstrBotConfig, FunctionTool
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
@@ -206,13 +207,87 @@ class WebpImagePlugin(Star):
                 "Cannot identify the message sender. No image task was queued."
             )
         requested_at = int(time.time())
+        # The enqueue lock covers both the quota check and the appended receipt.
+        log_path = self.requests_dir / f"{quote(user_id, safe='')}.log"
+        self._check_user_quota(
+            log_path, user_id, arguments.get("number_of_images") or 1, requested_at
+        )
         request_dir = self.api.create_request(self.output_dir, arguments, user_id=user_id)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
-        # Escape separators and control characters without changing ordinary IDs.
-        log_path = self.requests_dir / f"{quote(user_id, safe='')}.log"
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"{requested_at}\t{request_dir.name}\n")
         return request_dir
+
+    def _check_user_quota(
+        self, log_path: Path, user_id: str, requested: int, now: int
+    ) -> None:
+        """Read persisted receipts and YAML counts before accepting another request."""
+        window_minutes = self.api.config.get("user_window_minutes", 360)
+        maximum = self.api.config.get("user_max_images", 5)
+        for name, value in (
+            ("user_window_minutes", window_minutes),
+            ("user_max_images", maximum),
+        ):
+            if type(value) is not int or value < 0:
+                raise ImageGenerationError(f"{name} must be a nonnegative integer.")
+        if window_minutes == 0:
+            return
+        cutoff = now - window_minutes * 60
+        used = 0
+        try:
+            try:
+                log = log_path.open(encoding="utf-8")
+            except FileNotFoundError:
+                log = None
+            if log is not None:
+                with log:
+                    for line in log:
+                        if not line.strip():
+                            continue
+                        timestamp, request_id = line.rstrip("\n").split("\t")
+                        if not timestamp.isascii() or not timestamp.isdecimal():
+                            raise ValueError("Invalid receipt timestamp")
+                        # The sliding interval is (now - window, now].
+                        if not cutoff < int(timestamp) <= now:
+                            continue
+                        if (
+                            not request_id.isascii()
+                            or not request_id.isdecimal()
+                            or str(int(request_id)) != request_id
+                        ):
+                            raise ValueError("Invalid request ID")
+                        archive = yaml.safe_load(
+                            (self.output_dir / request_id / "request.yaml").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                        if (
+                            not isinstance(archive, dict)
+                            or archive.get("user_id") != user_id
+                            or not isinstance(archive.get("request"), dict)
+                        ):
+                            raise ValueError("Invalid request archive")
+                        count = archive["request"].get("number_of_images")
+                        if count is None:
+                            count = 1
+                        if type(count) is not int or count <= 0:
+                            raise ValueError("Invalid archived image count")
+                        used += count
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+            # Never treat missing or damaged in-window archives as unused quota.
+            raise ImageGenerationError(
+                "Cannot verify the image quota: request history or an in-window "
+                "request.yaml is missing or invalid. Restore the history or wait for "
+                "affected requests to leave the window. No image task was queued."
+            ) from None
+        if used + requested > maximum:
+            raise ImageGenerationError(
+                f"Image generation limit exceeded: {used}/{maximum} images used in "
+                f"the last {window_minutes} minutes; this request needs {requested}, "
+                f"but only {max(0, maximum - used)} remain. "
+                "Wait for earlier requests to leave the window or request fewer images. "
+                "No image task was queued. Do not automatically retry."
+            )
 
     async def _run_generation(
         self,
