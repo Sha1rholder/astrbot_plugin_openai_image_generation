@@ -18,14 +18,16 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 from .image_api import INPUT_SCHEMA, ImageAPI, ImageGenerationError
 
-PLUGIN_NAME = "astrbot_plugin_oai_image_api_webp_generate"
-GENERATION_TOOL_NAME = "oai_image_api_webp_generate"
-INSTRUCTIONS_TOOL_NAME = "get_oai_image_api_webp_generate_instructions"
-SYSTEM_HINT = f"Call {INSTRUCTIONS_TOOL_NAME} to generate static raster images with OpenAI Image API."
+PLUGIN_NAME = "astrbot_plugin_openai_image_generation"
+GENERATION_TOOL_NAME = "openai_image_api_generation_webp"
+INSTRUCTIONS_TOOL_NAME = "get_openai_image_api_generation_webp_instructions"
+SYSTEM_HINT = (
+    f"Call {INSTRUCTIONS_TOOL_NAME} to generate static WebP with OpenAI Image API."
+)
 INSTRUCTIONS_TOOL_DESCRIPTION = (
     "Read image generation instructions and available reference image indices."
 )
-GENERATION_TOOL_DESCRIPTION = f"generate static raster images with OpenAI Image API. Read {INSTRUCTIONS_TOOL_NAME} first."
+GENERATION_TOOL_DESCRIPTION = "Generate static WebP with OpenAI Image API."
 GUIDE = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
 
 
