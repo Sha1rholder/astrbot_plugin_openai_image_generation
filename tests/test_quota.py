@@ -161,7 +161,7 @@ async def test_zero_window_bypasses_quota_but_keeps_recording(quota_plugin, even
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("key", ["user_window_minutes", "user_max_images"])
+@pytest.mark.parametrize("key", ["user_window_minutes", "user_max_images", "total_window_minutes", "total_max_images"])
 @pytest.mark.parametrize("value", [-1, 1.5, 1.0, True, False, "5", None])
 async def test_invalid_quota_config_rejected_before_recording(quota_plugin, event, key, value):
     plugin = quota_plugin
@@ -206,3 +206,164 @@ def test_config_ui_defaults_match_runtime_defaults():
     assert schema["user_max_images"]["default"] == 5
     assert schema["user_window_minutes"]["type"] == "int"
     assert schema["user_max_images"]["type"] == "int"
+
+
+@pytest.mark.asyncio
+async def test_admin_identity_is_checked_on_every_call_and_never_hides_tool(quota_plugin, event):
+    plugin = quota_plugin
+    plugin.api.config.update(user_max_images=0, total_max_images=0)
+    for admin in (True, False, True):
+        event.is_admin.return_value = admin
+        result = await plugin.generate(event, ARGUMENTS)
+        assert ("queued in the background" in result) is admin
+        await asyncio.gather(*plugin._tasks)
+    assert event.is_admin.call_count == 3
+    assert plugin.context.add_llm_tools.call_args.args[1].active
+    assert (plugin.requests_dir / "total.log").read_text().splitlines() == [
+        f"{NOW}\ttrue\t1", f"{NOW}\ttrue\t1"
+    ]
+    assert len((plugin.requests_dir / "123456.log").read_text().splitlines()) == 2
+
+
+@pytest.mark.asyncio
+async def test_admin_and_member_usage_together_limit_only_members(quota_plugin, event):
+    plugin = quota_plugin
+    plugin.api.config.update(user_window_minutes=0, total_max_images=5)
+    event.is_admin.return_value = True
+    assert "queued in the background" in await plugin.generate(event, {**ARGUMENTS, "number_of_images": 3})
+    await asyncio.gather(*plugin._tasks)
+    event.is_admin.return_value = False
+    event.get_sender_id.return_value = "member"
+    assert "queued in the background" in await plugin.generate(event, {**ARGUMENTS, "number_of_images": 2})
+    await asyncio.gather(*plugin._tasks)
+    result = await plugin.generate(event, ARGUMENTS)
+    assert "5/5 images used" in result
+    assert "total quota for all users" in result
+    assert "Tell the user" in result
+    assert "not submitted" in result
+    assert "Do not automatically retry" in result
+    assert len((plugin.requests_dir / "total.log").read_text().splitlines()) == 2
+    event.is_admin.return_value = True
+    assert "queued in the background" in await plugin.generate(event, ARGUMENTS)
+    await asyncio.gather(*plugin._tasks)
+    assert (plugin.requests_dir / "total.log").read_text().splitlines() == [
+        f"{NOW}\ttrue\t3", f"{NOW}\tfalse\t2", f"{NOW}\ttrue\t1"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_personal_rejection_instructs_agent_how_to_reply(quota_plugin, event):
+    plugin = quota_plugin
+    plugin.api.config["user_max_images"] = 0
+    result = await plugin.generate(event, ARGUMENTS)
+    assert "personal quota" in result
+    assert "Tell the user" in result
+    assert "not submitted" in result
+    assert "user's language" in result
+    assert "Do not claim generation has started" in result
+
+
+@pytest.mark.asyncio
+async def test_total_window_slides_including_admin_receipts(quota_plugin, event, monkeypatch):
+    plugin = quota_plugin
+    plugin.api.config.update(total_window_minutes=1, total_max_images=5)
+    plugin.requests_dir.mkdir()
+    total = plugin.requests_dir / "total.log"
+    total.write_text(f"{NOW - 60}\tfalse\t5\n{NOW - 59}\ttrue\t5\n")
+    result = await plugin.generate(event, ARGUMENTS)
+    assert "5/5 images used" in result
+    assert "last 1 minutes" in result
+    monkeypatch.setattr(plugin_module.time, "time", lambda: NOW + 1)
+    assert "queued in the background" in await plugin.generate(event, ARGUMENTS)
+    await asyncio.gather(*plugin._tasks)
+
+
+@pytest.mark.asyncio
+async def test_total_quota_reserves_pending_requests_concurrently(quota_plugin, event):
+    plugin = quota_plugin
+    plugin.api.config.update(user_window_minutes=0, total_max_images=1)
+    results = await asyncio.gather(*(plugin.generate(event, ARGUMENTS) for _ in range(3)))
+    await asyncio.gather(*plugin._tasks)
+    assert sum("queued in the background" in result for result in results) == 1
+    assert sum("total quota for all users" in result for result in results) == 2
+    assert len((plugin.requests_dir / "total.log").read_text().splitlines()) == 1
+
+
+@pytest.mark.asyncio
+async def test_total_quota_survives_restart(quota_plugin, event):
+    plugin = quota_plugin
+    plugin.api.config.update(user_window_minutes=0, total_max_images=1)
+    await plugin.generate(event, ARGUMENTS)
+    await asyncio.gather(*plugin._tasks)
+    restarted = plugin_module.WebpImagePlugin(plugin.context, dict(plugin.api.config))
+    try:
+        assert "total quota for all users" in await restarted.generate(event, ARGUMENTS)
+    finally:
+        await restarted.terminate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["bad", f"{NOW}\tmaybe\t1", f"{NOW}\ttrue\t-1"])
+async def test_total_history_error_is_reported_to_agent(quota_plugin, event, damage):
+    plugin = quota_plugin
+    plugin.requests_dir.mkdir()
+    (plugin.requests_dir / "total.log").write_text(damage + "\n")
+    result = await plugin.generate(event, ARGUMENTS)
+    assert "Cannot verify the total image quota" in result
+    assert "Tell the user" in result
+    plugin.api.generate.assert_not_awaited()
+    assert not plugin.output_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_zero_total_window_skips_only_total_check(quota_plugin, event):
+    plugin = quota_plugin
+    plugin.api.config.update(total_window_minutes=0, total_max_images=0, user_max_images=1)
+    assert "queued in the background" in await plugin.generate(event, ARGUMENTS)
+    await asyncio.gather(*plugin._tasks)
+    assert "personal quota" in await plugin.generate(event, ARGUMENTS)
+    assert len((plugin.requests_dir / "total.log").read_text().splitlines()) == 1
+
+
+@pytest.mark.asyncio
+async def test_both_logs_keep_only_latest_1000_receipts(quota_plugin, event):
+    plugin = quota_plugin
+    plugin.requests_dir.mkdir()
+    user = plugin.requests_dir / "123456.log"
+    total = plugin.requests_dir / "total.log"
+    user_lines = [f"{i}\t{i}" for i in range(1005)]
+    total_lines = [f"{i}\ttrue\t1" for i in range(1005)]
+    user.write_text("\n".join(user_lines) + "\n")
+    total.write_text("\n".join(total_lines) + "\n")
+    assert "queued in the background" in await plugin.generate(event, ARGUMENTS)
+    await asyncio.gather(*plugin._tasks)
+    assert user.read_text().splitlines() == user_lines[6:] + [f"{NOW}\t0"]
+    assert total.read_text().splitlines() == total_lines[6:] + [f"{NOW}\tfalse\t1"]
+    assert len(user.read_text().splitlines()) == 1000
+    assert len(total.read_text().splitlines()) == 1000
+    assert not list(plugin.requests_dir.glob(".log-*"))
+
+
+@pytest.mark.asyncio
+async def test_user_named_total_cannot_collide_with_aggregate_log(quota_plugin, event):
+    plugin = quota_plugin
+    event.get_sender_id.return_value = "total"
+    assert "queued in the background" in await plugin.generate(event, ARGUMENTS)
+    await asyncio.gather(*plugin._tasks)
+    assert (plugin.requests_dir / "%74otal.log").read_text() == f"{NOW}\t0\n"
+    assert (plugin.requests_dir / "total.log").read_text() == f"{NOW}\tfalse\t1\n"
+
+
+@pytest.mark.asyncio
+async def test_failed_generation_is_still_in_total_log(quota_plugin, event):
+    plugin = quota_plugin
+    plugin.api.generate.side_effect = httpx.ConnectError("offline")
+    await plugin.generate(event, {**ARGUMENTS, "number_of_images": 2})
+    await asyncio.gather(*plugin._tasks)
+    assert (plugin.requests_dir / "total.log").read_text() == f"{NOW}\tfalse\t2\n"
+
+
+def test_total_config_defaults():
+    schema = json.loads((ROOT / "_conf_schema.json").read_text())
+    assert schema["total_window_minutes"]["default"] == 360
+    assert schema["total_max_images"]["default"] == 30

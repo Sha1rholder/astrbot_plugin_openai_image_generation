@@ -1,33 +1,33 @@
 {
-  "metadata": {
-    "display_name": "OpenAI Image API生图",
-    "short_desc": "让agent通过OpenAI Image API生成WebP",
-    "desc": "一个极简、易用的，为agent提供的OpenAI Image API图像生成工具。系统提示词极简，图像生成记录持久保存，并提供合理且可由agent调整的默认参数。支持gpt-image-2.6-sunburst和gpt-image-2.6-flare"
-  },
-  "config": {
-    "api_key": {
-      "description": "OPENAI_API_KEY",
-      "hint": "在此填写API密钥，留空时读取环境变量OPENAI_API_KEY"
-    },
-    "base_url": {
-      "description": "图像API基础地址",
-      "hint": "地址应包含`/v1`，不要包含`/images/generations`。使用参考图像时，服务需支持向`/images/edits`发送JSON请求"
-    },
-    "timeout_seconds": {
-      "description": "API请求超时时间（秒）",
-      "hint": "后台图像API请求的超时时间。工具会立即返回，无需增加AstrBot的工具超时时间。请求失败后不会自动重试"
-    },
-    "max_storage_gb": {
-      "description": "最大储存占用（GB）",
-      "hint": "每次调用生图接口前统计图片归档目录的全部文件容量，超限时从最早的请求文件夹开始删除，直到低于上限。保留当前及排队中的请求；新生成的图片可能暂时超限，下次请求前再清理"
-    },
-    "user_window_minutes": {
-      "description": "每个用户的滑动窗口时长（分钟）",
-      "hint": "非负整数，默认360分钟。设为0时跳过滑动窗口配额检查"
-    },
-    "user_max_images": {
-      "description": "每个用户在滑动窗口内的最大图像数量",
-      "hint": "非负整数，默认5张。按请求的图像数量计数，包括等待中和失败的任务。配额为0时，正常配额检查会拒绝请求，但工具仍可用。窗口时长为0时忽略此设置。被拒绝的请求不会被记录"
-    }
-  }
+	"metadata": {
+		"display_name": "OpenAI Image API生图",
+		"short_desc": "让agent通过OpenAI Image API生成WebP",
+		"desc": "一个极简、易用的，为agent提供的OpenAI Image API图像生成工具。系统提示词极简，图像生成记录持久保存，并提供合理且可由agent调整的默认参数。支持gpt-image-2.6-sunburst和gpt-image-2.6-flare"
+	},
+	"config": {
+		"api_key": {
+			"description": "OPENAI_API_KEY",
+			"hint": "在此填写API密钥，留空时读取环境变量OPENAI_API_KEY"
+		},
+		"base_url": {
+			"description": "图像API基础地址",
+			"hint": "地址应包含`/v1`，不要包含`/images/generations`。使用参考图像时，服务需支持向`/images/edits`发送JSON请求"
+		},
+		"timeout_seconds": {
+			"description": "API请求超时时间（秒）",
+			"hint": "后台图像API请求的超时时间。工具会立即返回，无需增加AstrBot的工具超时时间。请求失败后不会自动重试"
+		},
+		"max_storage_gb": {
+			"description": "最大储存占用（GB）",
+			"hint": "每次调用生图接口前统计图片归档目录的全部文件容量，超限时从最早的请求文件夹开始删除，直到低于上限。保留当前及排队中的请求；新生成的图片可能暂时超限，下次请求前再清理"
+		},
+		"user_window_minutes": {
+			"description": "每个用户的滑动窗口时长（分钟）",
+			"hint": "非负整数，默认360分钟。设为0时跳过滑动窗口配额检查"
+		},
+		"user_max_images": {
+			"description": "每个用户在滑动窗口内的最大图像数量",
+			"hint": "非负整数，默认5张。按请求的图像数量计数，包括等待中和失败的任务。配额为0时，正常配额检查会拒绝请求，但工具仍可用。窗口时长为0时忽略此设置。被拒绝的请求不会被记录"
+		}
+	}
 }

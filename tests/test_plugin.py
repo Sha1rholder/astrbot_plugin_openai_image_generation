@@ -620,7 +620,7 @@ async def test_sender_id_is_escaped_only_in_log_filename(plugin, event):
     plugin.api.generate = AsyncMock(return_value=[])
     await plugin.generate(event, {"description": "cat", "prompt": {"text": "cat"}})
     await asyncio.gather(*plugin._tasks)
-    assert [p.name for p in plugin.requests_dir.iterdir()] == [quote(user_id, safe="") + ".log"]
+    assert {p.name for p in plugin.requests_dir.iterdir()} == {quote(user_id, safe="") + ".log", "total.log"}
     archive = yaml.safe_load((plugin.output_dir / "0" / "request.yaml").read_text())
     assert archive["user_id"] == user_id
 

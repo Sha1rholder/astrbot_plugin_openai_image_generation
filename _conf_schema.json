@@ -33,7 +33,19 @@
 	"user_max_images": {
 		"description": "Maximum images per user in the sliding window",
 		"type": "int",
-		"default": 5,
-		"hint": "Nonnegative integer. Default: 5 images. Counts requested images, including pending and failed jobs. A quota of 0 rejects requests through the normal quota check; the tool remains available. Ignored when the window is 0. Rejected requests are not recorded."
+		"default": 3,
+		"hint": "Nonnegative integer. Default: 5 images. Counts requested images, including pending and failed jobs. A quota of 0 rejects requests through the normal quota check; the tool remains available. Ignored when the window is 0. Rejected requests are not recorded. Administrators bypass this check. Uses the latest 1000 receipts per user."
+	},
+	"total_window_minutes": {
+		"description": "Total sliding window (minutes)",
+		"type": "int",
+		"default": 360,
+		"hint": "Nonnegative integer. Set to 0 to skip the total quota check. Administrators bypass both quota checks but their usage still counts."
+	},
+	"total_max_images": {
+		"description": "Maximum images for all users in the total window",
+		"type": "int",
+		"default": 30,
+		"hint": "Nonnegative integer. Counts all accepted images, including administrator requests. Only ordinary users are restricted. Set to 0 to reject ordinary-user requests when the total window is enabled. Uses the latest 1000 total receipts."
 	}
 }
