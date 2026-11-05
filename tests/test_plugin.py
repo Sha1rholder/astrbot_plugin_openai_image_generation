@@ -12,7 +12,7 @@ from mcp.types import TextContent
 from PIL import Image as PILImage
 
 from astrbot.api import ToolSet
-from astrbot.api.message_components import Image, Reply
+from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
@@ -24,8 +24,8 @@ def test_registered_tools_have_plugin_ownership(plugin):
     """Verify tool ownership and schema compatibility with supported providers."""
     tools = plugin.context.add_llm_tools.call_args.args
     assert {tool.name for tool in tools} == {
-        "get_image_generation_instructions",
-        "generate_webp_image",
+        "get_oai_image_api_webp_generate_instructions",
+        "oai_image_api_webp_generate",
     }
     assert all(
         _resolve_tool_handler_module_path(tool) == plugin_module.__name__
@@ -149,19 +149,22 @@ async def test_reference_loading_failure_prevents_api_call(plugin, event, monkey
 
 
 @pytest.mark.asyncio
-async def test_partial_delivery_never_regenerates(plugin, event, tmp_path):
-    """Verify partial delivery reports saved outputs without generating again."""
+async def test_combined_delivery_failure_never_regenerates(plugin, event, tmp_path):
+    """Verify failed delivery reports uncertainty without generating or sending again."""
     plugin.api.generate = AsyncMock(
         return_value=[tmp_path / "one.webp", tmp_path / "two.webp"]
     )
-    event.send.side_effect = [None, RuntimeError("private upstream response")]
+    event.send.side_effect = RuntimeError("private upstream response")
     result = await plugin.generate(
         event,
         {"description": "A cat", "prompt": {"text": "cat"}, "number_of_images": 2},
     )
-    assert "Generated 2" in result and "delivered 1" in result
+    assert "Generated 2" in result and "delivery status is unknown" in result
+    assert str(plugin.output_dir) in result
     assert "Do not regenerate" in result and "private upstream" not in result
+    assert "automatically resend" in result
     plugin.api.generate.assert_awaited_once()
+    event.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -192,17 +195,33 @@ async def test_cancellation_propagates(plugin, event):
 
 
 @pytest.mark.asyncio
-async def test_astrbot_executor_to_http_to_delivery(plugin, event, tmp_path):
-    """Verify tool execution through AstrBot, HTTP generation, storage, and delivery."""
-    output = io.BytesIO()
-    PILImage.new("RGB", (16, 16), "blue").save(output, "WEBP")
-    encoded = base64.b64encode(output.getvalue()).decode()
+@pytest.mark.parametrize("requested,returned", [(1, 1), (2, 2), (5, 5), (5, 2)])
+async def test_astrbot_executor_to_http_to_delivery(
+    plugin, event, tmp_path, requested, returned
+):
+    """Verify one automatic message contains the description and every returned image."""
+    outputs = []
+    for index in range(returned):
+        output = io.BytesIO()
+        PILImage.new("RGB", (16, 16), (index * 50, 0, 255)).save(output, "WEBP")
+        outputs.append(output.getvalue())
+    description = "窗边的橘猫\n水彩插画"
+    event.chain_result.side_effect = lambda components: (
+        plugin_module.AstrMessageEvent.chain_result(event, components)
+    )
     requests = []
 
     def respond(request):
-        """Capture the outgoing request and return a generated WebP fixture."""
+        """Capture the outgoing request and return generated WebP fixtures."""
         requests.append(request)
-        return httpx.Response(200, json={"data": [{"b64_json": encoded}]})
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"b64_json": base64.b64encode(raw).decode()} for raw in outputs
+                ]
+            },
+        )
 
     plugin.api.client = httpx.AsyncClient(
         base_url="https://example.invalid/v1/", transport=httpx.MockTransport(respond)
@@ -225,22 +244,32 @@ async def test_astrbot_executor_to_http_to_delivery(plugin, event, tmp_path):
         result = [
             item
             async for item in FunctionToolExecutor._execute_local(
-                tools[1], context, prompt={"text": "cat"}, description="A cat"
+                tools[1],
+                context,
+                prompt={"text": "cat"},
+                description=description,
+                number_of_images=requested,
             )
         ]
         generation_result = result[0]
         assert generation_result is not None
         generation_content = generation_result.content[0]
         assert isinstance(generation_content, TextContent)
-        assert "delivered 1" in generation_content.text
+        assert f"delivered {returned}" in generation_content.text
+        assert "with the description in one message" in generation_content.text
         assert len(requests) == 1
+        assert json.loads(requests[0].content)["n"] == requested
         event.send.assert_awaited_once()
-        component = event.send.call_args.args[0][0]
-        assert isinstance(component, Image)
-        assert (
-            list((tmp_path / "images").glob("*/*.webp"))[0].read_bytes()
-            == output.getvalue()
-        )
+        message = event.send.call_args.args[0]
+        assert isinstance(message, plugin_module.MessageEventResult)
+        assert len(message.chain) == returned + 1
+        assert isinstance(message.chain[0], Plain)
+        assert message.chain[0].text == description
+        for index, component in enumerate(message.chain[1:]):
+            assert isinstance(component, Image)
+            path = tmp_path / "images" / "0" / f"{index}.webp"
+            assert component.file == Image.fromFileSystem(str(path)).file
+            assert path.read_bytes() == outputs[index]
     finally:
         await plugin.terminate()
 

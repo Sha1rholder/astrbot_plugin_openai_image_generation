@@ -1,19 +1,17 @@
 # Image generation instructions
 
-Use `generate_webp_image` to generate and deliver WebP images with GPT Image 2.6. Unless user specifies, in most cases you should omit optional arguments as all have reasonable defaults.
+Use `oai_image_api_webp_generate` to generate and deliver lossless static WebP with OpenAI's latest image generation models, currently `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`. Unless user specifies, in most cases you should omit optional arguments as all have reasonable defaults.
 
 ## Parameters
 
 - `prompt`: Object with required `text` and optional `images` reference indices
-- `description`: A short description of the images you expect. Will be sent to user along with generated images.
-- (Optional) `model`: `sunburst` offers better quality at higher cost and latency; `flare` is faster and cheaper. Defaults to `sunburst`
-- (Optional) `size`: String in `WIDTHxHEIGHT` format such as `"1536x1024"`. Automatically selected if omitted
-- (Optional) `quality`: `low`, `medium`, `high`, `xhigh`, `max`. Defaults to `auto`
-- (Optional) `complexity`: `low`, `medium`, `high`. Defaults to `high`; set manually only when reducing generation latency is needed
-- (Optional) `background_transparency`: `opaque` or `transparent`. Defaults to `auto`
-- (Optional) `number_of_images`: Integer from 1 to 5. Defaults to 1; set manually only when generating multiple images at once
-
-Both dimensions must be multiples of 16 and no greater than 3840. The aspect ratio must be between 1:3 and 3:1. Total pixels must be between 655,360 and 8,294,400. Resolutions above 2560x1440 total pixels are experimental.
+- `description`: A short description of the images you expect. Automatically sent to the user before all generated images in the same message.
+- (Optional) `model`: `sunburst` offers better quality at higher cost and latency; `flare` is faster and cheaper. Defaults to `sunburst`.
+- (Optional) `size`: String in `WIDTHxHEIGHT` format such as `1536x1024`. Both dimensions must be multiples of 16 and no greater than 3840. The aspect ratio must be between 1:3 and 3:1. Total pixels must be between 655,360 and 8,294,400. Resolutions above 2560x1440 total pixels are experimental. Automatically selected if omitted.
+- (Optional) `quality`: `low`, `medium`, `high`, `xhigh`, `max`. Defaults to `auto`.
+- (Optional) `complexity`: `low`, `medium`, `high`. Defaults to `high`; set manually only when reducing generation latency is needed.
+- (Optional) `background_transparency`: `opaque` or `transparent`. Defaults to `auto`.
+- (Optional) `number_of_images`: Integer from 1 to 5. Defaults to 1; set manually only when generating multiple images at once.
 
 ## Reference images
 
@@ -34,12 +32,12 @@ Minimal generation:
 ```
 
 ```json
-{"prompt":{"text":"An angry chibi anime girl with blue hair on a white background, saying 'Why are u licking my shoes!'"},"description":"Angry chibi girl emoji","model":"flare","quality":"low","complexity":"low","size":"1024x640","number_of_images":2}
+{"prompt":{"text":"An angry chibi anime girl with black hair in her bedroom with pink background saying \"Why are u licking my shoes!\""},"description":"Angry chibi girl emoji","model":"flare","quality":"low","complexity":"low","size":"1024x640","number_of_images":2}
 ```
 
 In most cases, your prompt should be much longer with more detailed descriptions.
 
-On success, the tool has already sent the images. Do not resend them or invent image links. Report failures accurately. Do not automatically regenerate after timeouts, network errors, or delivery failures: a new request may incur duplicate charges.
+On success, the tool has already sent the description and all generated images together in one message. Do not resend the description or images, or invent image links. Report failures accurately. Do not automatically regenerate after timeouts, network errors, or delivery failures: a new request may incur duplicate charges. A delivery failure leaves delivery status unknown; do not automatically resend.
 
 ## Finding previous requests
 

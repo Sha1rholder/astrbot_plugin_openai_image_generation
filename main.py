@@ -9,7 +9,7 @@ import httpx
 
 from astrbot.api import AstrBotConfig, FunctionTool
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
-from astrbot.api.message_components import Image, Reply
+from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.run_context import ContextWrapper
@@ -18,23 +18,25 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 from .image_api import INPUT_SCHEMA, ImageAPI, ImageGenerationError
 
 PLUGIN_NAME = "astrbot_plugin_oai_image_api_webp_generate"
-SYSTEM_HINT = (
-    "You can generate images with generate_webp_image (GPT Image 2.6). "
-    "Call get_image_generation_instructions before use."
+GENERATION_TOOL_NAME = "oai_image_api_webp_generate"
+INSTRUCTIONS_TOOL_NAME = "get_oai_image_api_webp_generate_instructions"
+SYSTEM_HINT = f"Call {INSTRUCTIONS_TOOL_NAME} first to generate static raster images with OpenAI Image API."
+INSTRUCTIONS_TOOL_DESCRIPTION = (
+    "Read image generation instructions and available reference image indices."
 )
-GUIDE = (
-    Path(__file__)
-    .with_name("image_generation_instructions.md")
-    .read_text(encoding="utf-8")
+GENERATION_TOOL_DESCRIPTION = (
+    "Generate WebP images and automatically send the description and all images in one message. "
+    f"Read {INSTRUCTIONS_TOOL_NAME} first."
 )
+GUIDE = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
 
 
 class ImageInstructionsTool(FunctionTool[AstrAgentContext]):
     def __init__(self, plugin: WebpImagePlugin) -> None:
         """Register the instructions tool and retain its owning plugin."""
         super().__init__(
-            name="get_image_generation_instructions",
-            description="Read image generation instructions and available reference image indices.",
+            name=INSTRUCTIONS_TOOL_NAME,
+            description=INSTRUCTIONS_TOOL_DESCRIPTION,
             parameters={
                 "type": "object",
                 "properties": {},
@@ -54,8 +56,8 @@ class GenerateWebpTool(FunctionTool[AstrAgentContext]):
     def __init__(self, plugin: WebpImagePlugin) -> None:
         """Register the generation tool with its input schema and owning plugin."""
         super().__init__(
-            name="generate_webp_image",
-            description="Generate and send WebP images. Read get_image_generation_instructions first.",
+            name=GENERATION_TOOL_NAME,
+            description=GENERATION_TOOL_DESCRIPTION,
             parameters=INPUT_SCHEMA,
         )
         self.plugin = plugin
@@ -119,7 +121,7 @@ class WebpImagePlugin(Star):
         """Append the image tool hint once when both required tools are active."""
         if req.func_tool is None:
             return
-        for name in ("generate_webp_image", "get_image_generation_instructions"):
+        for name in (GENERATION_TOOL_NAME, INSTRUCTIONS_TOOL_NAME):
             tool = req.func_tool.get_tool(name)
             if tool is None or not tool.active:
                 return
@@ -147,7 +149,7 @@ class WebpImagePlugin(Star):
             payload, indices = self.api.prepare(arguments)
             references = self.reference_images(event)
             if any(index > len(references) for index in indices):
-                return "Reference image index does not exist. Call get_image_generation_instructions for available indices."
+                return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
             # Resolve only explicitly selected attachments, never model-supplied paths.
             encoded_images: list[str] = []
             for index in indices:
@@ -174,21 +176,25 @@ class WebpImagePlugin(Star):
             self.logger.error("Image storage failed: %s", type(exc).__name__)
             return "Could not read or save image files. Check disk space and plugin data directory permissions. Do not automatically regenerate."
 
-        sent = 0
         try:
-            for path in paths:
-                await event.send(event.chain_result([Image.fromFileSystem(str(path))]))
-                sent += 1
+            await event.send(
+                event.chain_result(
+                    [
+                        Plain(arguments["description"]),
+                        *(Image.fromFileSystem(str(path)) for path in paths),
+                    ]
+                )
+            )
         except Exception as exc:
             self.logger.warning(
                 "Generated image delivery failed: %s", type(exc).__name__
             )
             return (
-                f"Generated {len(paths)} WebP images; delivered {sent}. Delivery of the remainder failed. "
+                f"Generated {len(paths)} WebP images, but sending the combined description and images failed; delivery status is unknown. "
                 f"Files are saved in {self.output_dir}. Check platform permissions and format support. "
-                "Do not regenerate or claim all images were delivered."
+                "Do not regenerate, automatically resend, or claim all images were delivered."
             )
-        return f"Generated and delivered {sent} WebP images. Do not send them again or embed them in Markdown."
+        return f"Generated and delivered {len(paths)} WebP images with the description in one message. Do not send the description or images again or embed them in Markdown."
 
     async def terminate(self) -> None:
         """Close the image API client when the plugin is unloaded."""

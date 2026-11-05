@@ -40,7 +40,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Required short description of the expected images, also stored verbatim in description.txt. Must not be blank.",
+          "description": "Short description of the expected images, automatically sent along with the generated images to user and stored verbatim in description.txt.",
           "minLength": 1,
           "maxLength": 1000
         },
@@ -54,7 +54,7 @@
             "flare",
             null
           ],
-          "description": "Model alias. Omitted or null selects flare; the plugin maps the alias to gpt-image-2.6-{alias}."
+          "description": "Model alias. Omitted or null selects sunburst; the plugin maps the alias to gpt-image-2.6-{alias}."
         },
         "size": {
           "type": [
@@ -77,7 +77,7 @@
             "max",
             null
           ],
-          "description": "Image quality. Omitted or null selects medium."
+          "description": "Image quality. Omitted or null selects auto."
         },
         "complexity": {
           "type": [
@@ -102,7 +102,7 @@
             "opaque",
             null
           ],
-          "description": "Background transparency. Omitted or null selects opaque."
+          "description": "Background transparency. Omitted or null selects auto."
         },
         "number_of_images": {
           "type": [
@@ -119,7 +119,7 @@
         "description"
       ],
       "additionalProperties": false,
-      "description": "The original JSON arguments supplied by the LLM to generate_webp_image, before defaults, prompt trimming, model name expansion or Image API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
+      "description": "The original JSON arguments supplied by the LLM to oai_image_api_webp_generate, before defaults, prompt trimming, model name expansion or Image API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
     }
   },
   "required": [

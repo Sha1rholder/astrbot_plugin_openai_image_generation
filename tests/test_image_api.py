@@ -27,12 +27,12 @@ def test_defaults_and_fixed_fields():
     )
     assert refs == []
     assert payload == {
-        "model": "gpt-image-2.6-flare",
+        "model": "gpt-image-2.6-sunburst",
         "prompt": "Draw a cat",
         "size": "auto",
-        "quality": "medium",
+        "quality": "auto",
         "complexity": "high",
-        "background": "opaque",
+        "background": "auto",
         "n": 1,
         "output_format": "webp",
         "output_compression": 100,

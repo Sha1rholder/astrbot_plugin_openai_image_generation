@@ -86,12 +86,12 @@ class ImageAPI:
                 )
             api_size = f"{width}x{height}"
         payload: dict[str, Any] = {
-            "model": "gpt-image-2.6-" + (arguments.get("model") or "flare"),
+            "model": "gpt-image-2.6-" + (arguments.get("model") or "sunburst"),
             "prompt": prompt,
             "size": api_size,
-            "quality": arguments.get("quality") or "medium",
+            "quality": arguments.get("quality") or "auto",
             "complexity": arguments.get("complexity") or "high",
-            "background": arguments.get("background_transparency") or "opaque",
+            "background": arguments.get("background_transparency") or "auto",
             "n": int(arguments.get("number_of_images") or 1),
             "output_format": "webp",
             "output_compression": 100,
