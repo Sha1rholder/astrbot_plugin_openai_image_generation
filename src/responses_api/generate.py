@@ -13,6 +13,8 @@ from typing import Any
 import yaml
 
 from ..image_api.generate import (
+    GENERATION_TOOL_NAME,
+    INSTRUCTIONS_TOOL_NAME,
     REQUEST_SCHEMA,
     STORAGE_LOCK,
     ImageAPI,
@@ -31,19 +33,21 @@ class ResponsesAPI(ImageAPI):
     """Optimize prompts with an LLM and generate images through the Responses API."""
 
     api_name = "responses"
+    instructions_tool_name = INSTRUCTIONS_TOOL_NAME + "_responses_api"
+    generation_tool_name = GENERATION_TOOL_NAME + "_responses_api"
     input_schema = deepcopy(REQUEST_SCHEMA["properties"]["request"])
     input_schema["properties"].pop("description")
     guide = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
-    tool_description = (
-        "Generate static WebP with automatic prompt optimization using OpenAI."
-    )
+    tool_description = "Generate static WebP with automatic prompt optimization using OpenAI Responses API."
 
     def __init__(self, config: Mapping[str, Any], plugin_dir: Path) -> None:
         super().__init__(config, plugin_dir)
-        default_llm = config.get("responses_default_llm", "terra")
+        default_llm = config.get(
+            "responses_api_default_llm", config.get("responses_default_llm", "terra")
+        )
         if not isinstance(default_llm, str) or default_llm not in RESPONSES_MODELS:
             raise ImageGenerationError(
-                "responses_default_llm must be astra, sol, terra or luna."
+                "responses_api_default_llm (legacy responses_default_llm) must be astra, sol, terra or luna."
             )
         self.default_llm = default_llm
         self.input_schema = deepcopy(self.input_schema)

@@ -24,15 +24,27 @@ class WebpImagePlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
-        optimize_prompt = config.get("auto_optimize_prompt", True)
-        if type(optimize_prompt) is not bool:
-            raise ImageGenerationError("auto_optimize_prompt must be a boolean.")
-        backend = ResponsesAPI if optimize_prompt else ImageAPI
+        mode = config.get("api_mode", "Responses API only")
+        modes = {
+            "Responses API only": ("responses", None),
+            "Prefer Responses API": ("responses", "image"),
+            "Image API only": ("image", None),
+            "Prefer Image API": ("image", "responses"),
+        }
+        if not isinstance(mode, str) or mode not in modes:
+            raise ImageGenerationError("api_mode must be one of: " + ", ".join(modes))
+        preferred_api, alternative_api = modes[mode]
+        plugin_dir = Path(__file__).resolve().parent
         self.service = ImageService(
             context,
-            backend(config, Path(__file__).resolve().parent),
+            {
+                "responses": ResponsesAPI(config, plugin_dir),
+                "image": ImageAPI(config, plugin_dir),
+            },
             StarTools.get_data_dir(PLUGIN_NAME),
             self.logger,
+            preferred_api,
+            alternative_api,
         )
 
     @filter.command("image_help")

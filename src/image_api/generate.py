@@ -42,7 +42,6 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 PLUGIN_NAME = "astrbot_plugin_openai_image_generation"
 GENERATION_TOOL_NAME = "openai_image_generate_webp"
 INSTRUCTIONS_TOOL_NAME = "get_openai_image_generate_webp_instructions"
-SYSTEM_HINT = f"Call {INSTRUCTIONS_TOOL_NAME} to generate static WebP with OpenAI."
 INSTRUCTIONS_TOOL_DESCRIPTION = "Check API key configuration, then read image generation instructions and available reference image indices."
 
 
@@ -75,6 +74,8 @@ class ImageAPI:
     """Image API backend with shared HTTP, validation and archive handling."""
 
     api_name = "image"
+    instructions_tool_name = INSTRUCTIONS_TOOL_NAME + "_image_api"
+    generation_tool_name = GENERATION_TOOL_NAME + "_image_api"
     input_schema = INPUT_SCHEMA
     guide = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
     tool_description = "Generate static WebP with OpenAI Image API."
@@ -543,10 +544,15 @@ class ImageAPI:
 
 
 class ImageInstructionsTool(FunctionTool[AstrAgentContext]):
-    def __init__(self, service: ImageService) -> None:
-        """Register the instructions tool and retain its owning service."""
+    def __init__(self, service: ImageService, api: ImageAPI) -> None:
+        """Register the instructions tool and retain its owning service.
+
+        Args:
+            service: Shared service enforcing API restrictions.
+            api: Backend supplying the tool name and guide.
+        """
         super().__init__(
-            name=INSTRUCTIONS_TOOL_NAME,
+            name=api.instructions_tool_name,
             description=INSTRUCTIONS_TOOL_DESCRIPTION,
             parameters={
                 "type": "object",
@@ -555,29 +561,36 @@ class ImageInstructionsTool(FunctionTool[AstrAgentContext]):
             },
         )
         self.service = service
+        self.api_name = api.api_name
 
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **_kwargs: Any
     ) -> str:
         """Return generation instructions and reference indices for the current event."""
-        return self.service.instructions(context.context.event)
+        return self.service.instructions(context.context.event, self.api_name)
 
 
 class GenerateWebpTool(FunctionTool[AstrAgentContext]):
-    def __init__(self, service: ImageService) -> None:
-        """Register the generation tool with its input schema and owning service."""
+    def __init__(self, service: ImageService, api: ImageAPI) -> None:
+        """Register the generation tool with its input schema and owning service.
+
+        Args:
+            service: Shared service admitting and delivering requests.
+            api: Backend supplying the tool name and input schema.
+        """
         super().__init__(
-            name=GENERATION_TOOL_NAME,
-            description=service.api.tool_description,
-            parameters=service.api.input_schema,
+            name=api.generation_tool_name,
+            description=api.tool_description,
+            parameters=api.input_schema,
         )
         self.service = service
+        self.api_name = api.api_name
 
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs: Any
     ) -> str:
         """Forward model arguments and the current event to the image generation handler."""
-        return await self.service.generate(context.context.event, kwargs)
+        return await self.service.generate(context.context.event, kwargs, self.api_name)
 
 
 class ImageService:
@@ -586,12 +599,35 @@ class ImageService:
     def __init__(
         self,
         context: Context,
-        api: ImageAPI,
+        apis: dict[str, ImageAPI],
         data_dir: Path,
         logger: logging.Logger,
+        preferred_api: str,
+        alternative_api: str | None,
     ) -> None:
+        """Register both APIs with shared accounting and delivery state.
+
+        Args:
+            context: AstrBot context for tool registration and message delivery.
+            apis: Backends indexed by API name.
+            data_dir: Root directory for archives and quota receipts.
+            logger: Plugin logger.
+            preferred_api: Backend named first in the unconditional model hint.
+            alternative_api: Other allowed backend, or None to restrict calls.
+        """
         self.context = context
-        self.api = api
+        self.apis = apis
+        self.preferred_api = preferred_api
+        self.alternative_api = alternative_api
+        primary = self.api
+        guide = f"{primary.instructions_tool_name} to get instructions for {primary.generation_tool_name}"
+        self.system_hint = f"Use {guide}."
+        if alternative_api is not None:
+            alternative = apis[alternative_api]
+            self.system_hint = (
+                f"Prefer using {guide}; you may also use {alternative.instructions_tool_name} "
+                f"to get instructions for {alternative.generation_tool_name}."
+            )
         self.logger = logger
         self.output_dir = data_dir / "images"
         self.requests_dir = data_dir / "requests"
@@ -605,7 +641,29 @@ class ImageService:
             WeakKeyDictionary()
         )
         self._stopping = False
-        context.add_llm_tools(ImageInstructionsTool(self), GenerateWebpTool(self))
+        ordered_apis = [
+            primary,
+            *(api for name, api in apis.items() if name != preferred_api),
+        ]
+        context.add_llm_tools(
+            *(
+                tool
+                for api in ordered_apis
+                for tool in (
+                    ImageInstructionsTool(self, api),
+                    GenerateWebpTool(self, api),
+                )
+            )
+        )
+
+    @property
+    def api(self) -> ImageAPI:
+        """Return the preferred backend for help and shared configuration.
+
+        Returns:
+            The configured preferred API backend.
+        """
+        return self.apis[self.preferred_api]
 
     @staticmethod
     def reference_images(event: AstrMessageEvent) -> list[MessageImage]:
@@ -626,22 +684,36 @@ class ImageService:
                 )
         return images
 
-    def instructions(self, event: AstrMessageEvent) -> str:
-        """Check credentials before returning the guide and current reference indices."""
+    def instructions(self, event: AstrMessageEvent, api_name: str | None = None) -> str:
+        """Check mode and credentials before returning the guide and references.
+
+        Args:
+            event: Message whose attachments provide reference images.
+            api_name: Requested backend, or the configured preference for help.
+
+        Returns:
+            The selected guide, a configuration error, or allowed-tool guidance.
+        """
+        api = self.apis[api_name or self.preferred_api]
+        if api.api_name not in (self.preferred_api, self.alternative_api):
+            return (
+                f"{api.api_name.title()} API is disabled by the configured API mode. "
+                f"Use {self.api.instructions_tool_name} to get instructions for "
+                f"{self.api.generation_tool_name} instead."
+            )
         try:
-            self.api.require_api_key()
+            api.require_api_key()
         except ImageGenerationError as exc:
             return str(exc)
         images = self.reference_images(event)
         available = ", ".join(str(i) for i in range(1, len(images) + 1)) or "none"
         return (
-            f"{self.api.guide}\n\nImage archive directory on the AstrBot host: {self.output_dir.resolve()}"
+            f"{api.guide}\n\nImage archive directory on the AstrBot host: {self.output_dir.resolve()}"
             f"\nAvailable reference image indices for this message: {available}"
         )
 
     def add_image_hint(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
-        # Respect tool selection and persona-level tool restrictions.
-        """Append the image tool hint once when both required tools are active."""
+        """Unconditionally append the configured API hint once per request."""
         if event not in self._turn_finished:
             finished = self._turn_finished.setdefault(event, asyncio.Event())
             # The request hook runs in the pipeline task, before tool execution
@@ -650,14 +722,8 @@ class ImageService:
             owner = asyncio.current_task()
             if owner is not None:
                 owner.add_done_callback(lambda _task: finished.set())
-        if req.func_tool is None:
-            return
-        for name in (GENERATION_TOOL_NAME, INSTRUCTIONS_TOOL_NAME):
-            tool = req.func_tool.get_tool(name)
-            if tool is None or not tool.active:
-                return
-        if SYSTEM_HINT not in req.system_prompt:
-            req.system_prompt += "\n" + SYSTEM_HINT
+        if self.system_hint not in req.system_prompt:
+            req.system_prompt += "\n" + self.system_hint
 
     async def mark_agent_finished(self, event: AstrMessageEvent) -> None:
         """Record generation completion without releasing unsent final text."""
@@ -670,21 +736,34 @@ class ImageService:
             if finished is not None:
                 finished.set()
 
-    async def generate(self, event: AstrMessageEvent, arguments: dict[str, Any]) -> str:
+    async def generate(
+        self,
+        event: AstrMessageEvent,
+        arguments: dict[str, Any],
+        api_name: str | None = None,
+    ) -> str:
         """Enqueue a request without waiting for reference loading or generation.
 
         Args:
             event: Original message and destination for the background result.
             arguments: Model arguments to validate and snapshot before enqueueing.
+            api_name: Backend selected by the tool, or the configured preference.
 
         Returns:
             A queued acknowledgement or an immediate validation error.
         """
+        api = self.apis[api_name or self.preferred_api]
+        if api.api_name not in (self.preferred_api, self.alternative_api):
+            return (
+                f"{api.api_name.title()} API is disabled by the configured API mode. "
+                f"Use {self.api.instructions_tool_name} to get instructions, then call "
+                f"{self.api.generation_tool_name} instead. No image task was queued."
+            )
         if self._stopping:
             return "The image plugin is shutting down. No image task was queued."
         arguments = deepcopy(arguments)
         try:
-            payload, indices = self.api.prepare(arguments)
+            payload, indices = api.prepare(arguments)
         except ImageGenerationError as exc:
             return str(exc)
         references = self.reference_images(event)
@@ -700,6 +779,7 @@ class ImageService:
                     arguments,
                     event.get_sender_id(),
                     event.is_admin(),
+                    api,
                 )
             except ImageGenerationError as exc:
                 return str(exc)
@@ -714,11 +794,11 @@ class ImageService:
             if self._stopping:
                 return "The image plugin is shutting down. No image task was queued."
             try:
-                self.api.require_api_key()
+                api.require_api_key()
             except ImageGenerationError as exc:
                 return str(exc)
             if any(index > len(references) for index in indices):
-                return f"Reference image index does not exist. Call {INSTRUCTIONS_TOOL_NAME} for available indices."
+                return f"Reference image index does not exist. Call {api.instructions_tool_name} for available indices."
             selected = [(index, references[index - 1]) for index in indices]
             task = asyncio.create_task(
                 self._run_generation(
@@ -729,6 +809,7 @@ class ImageService:
                     origin,
                     request_dir,
                     self._turn_finished.setdefault(event, asyncio.Event()),
+                    api,
                 )
             )
             self._tasks.add(task)
@@ -743,7 +824,7 @@ class ImageService:
         )
 
     def _record_request(
-        self, arguments: dict[str, Any], user_id: str, is_admin: bool
+        self, arguments: dict[str, Any], user_id: str, is_admin: bool, api: ImageAPI
     ) -> Path:
         """Archive a parsed request and append its receipt before any API work."""
         if not user_id:
@@ -762,9 +843,7 @@ class ImageService:
         if not is_admin:
             self._check_user_quota(log_path, user_id, requested, requested_at)
             self._check_total_quota(total_path, requested, requested_at)
-        request_dir = self.api.create_request(
-            self.output_dir, arguments, user_id=user_id
-        )
+        request_dir = api.create_request(self.output_dir, arguments, user_id=user_id)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self._append_log(log_path, f"{requested_at}\t{request_dir.name}")
         self._append_log(
@@ -916,6 +995,7 @@ class ImageService:
         origin: str,
         request_dir: Path,
         turn_finished: asyncio.Event,
+        api: ImageAPI,
     ) -> None:
         """Serialize generation and delivery to protect pending files from retention.
 
@@ -927,11 +1007,12 @@ class ImageService:
             origin: Original conversation identifier for proactive delivery.
             request_dir: Numbered directory reserved before the tool acknowledgement.
             turn_finished: Gate released only after the foreground reply finishes.
+            api: Backend captured when the request was accepted.
         """
         async with self._generation_lock:
             try:
                 message = await self._generate(
-                    event, arguments, payload, references, request_dir
+                    event, arguments, payload, references, request_dir, api
                 )
             except Exception as exc:
                 self.logger.error(
@@ -965,6 +1046,7 @@ class ImageService:
         payload: dict[str, Any],
         references: list[tuple[int, MessageImage]],
         request_dir: Path,
+        api: ImageAPI,
     ) -> MessageEventResult:
         """Prepare a background success or failure message without retrying generation.
 
@@ -974,6 +1056,7 @@ class ImageService:
             payload: Validated request body for the selected API.
             references: Selected reference indices and attachment snapshots.
             request_dir: Existing directory containing the original request.
+            api: Backend captured when the request was accepted.
 
         Returns:
             A combined image message or a safe failure notification.
@@ -994,7 +1077,7 @@ class ImageService:
                     return event.plain_result(
                         f"Could not read reference image {index}. Please resend it. No API request was made."
                     )
-            paths = await self.api.generate(
+            paths = await api.generate(
                 payload, encoded_images, self.output_dir, arguments, request_dir
             )
         except ImageGenerationError as exc:
@@ -1032,7 +1115,7 @@ class ImageService:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
-        await self.api.close()
+        await asyncio.gather(*(api.close() for api in self.apis.values()))
 
 
 def _inline_tests():

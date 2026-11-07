@@ -24,28 +24,29 @@ from astrbot.core.star.context import _resolve_tool_handler_module_path
 ARGUMENTS = {"prompt": {"text": "cat"}}
 
 
-@pytest.mark.parametrize("plugin", [{"auto_optimize_prompt": False}, {}], indirect=True)
+@pytest.mark.parametrize("plugin", [{"api_mode": "Image API only"}, {}], indirect=True)
 def test_registered_tools_have_plugin_ownership(service):
     """Verify tool ownership and schema compatibility with supported providers."""
     tools = service.context.add_llm_tools.call_args.args
     assert {tool.name for tool in tools} == {
-        "get_openai_image_generate_webp_instructions",
-        "openai_image_generate_webp",
+        "get_openai_image_generate_webp_instructions_image_api",
+        "openai_image_generate_webp_image_api",
+        "get_openai_image_generate_webp_instructions_responses_api",
+        "openai_image_generate_webp_responses_api",
     }
     assert all(
         _resolve_tool_handler_module_path(tool) == plugin_module.__name__
         for tool in tools
     )
-    properties = tools[1].parameters["properties"]
-    assert ("description" in properties) == (service.api.api_name == "image")
-    assert "api" not in properties
-    assert ("llm" in properties) == (service.api.api_name == "responses")
-    assert ("previous_response_id" in properties) == (
-        service.api.api_name == "responses"
-    )
+    for tool in tools[1::2]:
+        properties = tool.parameters["properties"]
+        assert ("description" in properties) == (tool.api_name == "image")
+        assert "api" not in properties
+        assert ("llm" in properties) == (tool.api_name == "responses")
+        assert ("previous_response_id" in properties) == (tool.api_name == "responses")
     toolset = ToolSet(list(tools))
-    assert len(toolset.openai_schema()) == 2
-    assert len(toolset.anthropic_schema()) == 2
+    assert len(toolset.openai_schema()) == 4
+    assert len(toolset.anthropic_schema()) == 4
     from google.genai.types import Tool
 
     Tool.model_validate(toolset.google_schema())
@@ -54,6 +55,11 @@ def test_registered_tools_have_plugin_ownership(service):
 @pytest.mark.parametrize(
     "plugin",
     [
+        {"responses_api_default_llm": "astra"},
+        {"responses_api_default_llm": "sol"},
+        {"responses_api_default_llm": "terra"},
+        {"responses_api_default_llm": "luna"},
+        {"responses_api_default_llm": "sol", "responses_default_llm": "astra"},
         {"responses_default_llm": "astra"},
         {"responses_default_llm": "sol"},
         {"responses_default_llm": "terra"},
@@ -63,7 +69,9 @@ def test_registered_tools_have_plugin_ownership(service):
 )
 @pytest.mark.parametrize("override", [None, "terra"])
 def test_configured_llm_and_agent_override(service, event, override):
-    default = service.api.config["responses_default_llm"]
+    default = service.api.config.get(
+        "responses_api_default_llm", service.api.config.get("responses_default_llm")
+    )
     expected = plugin_module.ResponsesAPI
     assert isinstance(service.api, expected)
     assert service.api.input_schema["properties"]["llm"]["default"] == default
@@ -76,7 +84,7 @@ def test_configured_llm_and_agent_override(service, event, override):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plugin", [{"auto_optimize_prompt": False}, {}], indirect=True)
+@pytest.mark.parametrize("plugin", [{"api_mode": "Image API only"}, {}], indirect=True)
 async def test_agent_cannot_select_api(service, event):
     tool = service.context.add_llm_tools.call_args.args[1]
     context = ContextWrapper(
@@ -133,7 +141,7 @@ async def test_responses_continuation_from_archive_after_backend_restart(
             )
         elif index == 1:
             await service.api.close()
-            service.api = plugin_module.ResponsesAPI(
+            service.apis["responses"] = plugin_module.ResponsesAPI(
                 service.api.config, service.api.plugin_dir
             )
             service.api.client = httpx.AsyncClient(
@@ -171,7 +179,9 @@ async def test_responses_continuation_from_archive_after_backend_restart(
 @pytest.mark.parametrize(
     "config,field",
     [
-        ({"auto_optimize_prompt": "false"}, "auto_optimize_prompt"),
+        ({"api_mode": "invalid"}, "api_mode"),
+        ({"api_mode": False}, "api_mode"),
+        ({"responses_api_default_llm": "invalid"}, "responses_api_default_llm"),
         ({"responses_default_llm": "invalid"}, "responses_default_llm"),
     ],
 )
@@ -181,21 +191,21 @@ def test_invalid_backend_configuration(service, config, field):
 
 
 @pytest.mark.asyncio
-async def test_hint_is_idempotent_and_respects_tool_selection(plugin, service, event):
-    """Verify the hint is added once and respects missing or disabled tools."""
+async def test_hint_is_idempotent_and_unconditional(plugin, service, event):
+    """Verify the hint is added once even with missing or disabled tools."""
     tools = list(service.context.add_llm_tools.call_args.args)
     req = ProviderRequest(system_prompt="Original persona", func_tool=ToolSet(tools))
     await plugin.add_image_hint(event, req)
     await plugin.add_image_hint(event, req)
-    assert req.system_prompt == "Original persona\n" + api_module.SYSTEM_HINT
+    assert req.system_prompt == "Original persona\n" + service.system_hint
     for restricted in (None, ToolSet(tools[:1])):
         req = ProviderRequest(system_prompt="Original persona", func_tool=restricted)
         await plugin.add_image_hint(event, req)
-        assert req.system_prompt == "Original persona"
+        assert req.system_prompt == "Original persona\n" + service.system_hint
     tools[0].active = False
     req = ProviderRequest(system_prompt="Original persona", func_tool=ToolSet(tools))
     await plugin.add_image_hint(event, req)
-    assert req.system_prompt == "Original persona"
+    assert req.system_prompt == "Original persona\n" + service.system_hint
 
 
 def test_reference_order_and_instructions(service, event):
@@ -214,7 +224,7 @@ def test_reference_order_and_instructions(service, event):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plugin", [{"auto_optimize_prompt": False}, {}], indirect=True)
+@pytest.mark.parametrize("plugin", [{"api_mode": "Image API only"}, {}], indirect=True)
 async def test_help_command_uses_selected_backend_guide(plugin, service, event):
     messages = [message async for message in plugin.image_help(event)]
     assert messages == [service.instructions(event)]
@@ -324,7 +334,7 @@ async def test_combined_delivery_failure_never_regenerates(service, event, tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plugin", [{"auto_optimize_prompt": False}, {}], indirect=True)
+@pytest.mark.parametrize("plugin", [{"api_mode": "Image API only"}, {}], indirect=True)
 @pytest.mark.parametrize("requested,returned", [(1, 1), (2, 2), (5, 2)])
 @pytest.mark.parametrize("has_text", [True, False])
 async def test_astrbot_executor_to_http_to_delivery(
@@ -701,7 +711,7 @@ async def test_sender_id_is_escaped_only_in_log_filename(service, event):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plugin", [{"auto_optimize_prompt": False}, {}], indirect=True)
+@pytest.mark.parametrize("plugin", [{"api_mode": "Image API only"}, {}], indirect=True)
 @pytest.mark.parametrize("platform", ["webchat", "qq_official"])
 @pytest.mark.parametrize("outcome", ["success", "api_error", "unexpected_error"])
 async def test_ready_results_wait_for_final_reply(
@@ -758,7 +768,7 @@ async def test_ready_results_wait_for_final_reply(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plugin", [{"auto_optimize_prompt": False}, {}], indirect=True)
+@pytest.mark.parametrize("plugin", [{"api_mode": "Image API only"}, {}], indirect=True)
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_pipeline_completion_releases_without_final_message(
     plugin, service, event, cancelled
@@ -793,7 +803,7 @@ async def test_pipeline_completion_releases_without_final_message(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plugin", [{"auto_optimize_prompt": False}, {}], indirect=True)
+@pytest.mark.parametrize("plugin", [{"api_mode": "Image API only"}, {}], indirect=True)
 async def test_unload_cancels_result_waiting_for_reply(plugin, service, event):
     service.api.generate = AsyncMock(return_value=[])
     assert "queued in the background" in await service.generate(

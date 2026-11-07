@@ -1,6 +1,6 @@
-# Image generation instructions (Response API)
+# Image generation instructions (Responses API)
 
-Use `openai_image_generate_webp` to generate and deliver lossless static WebP with OpenAI Responses API and `gpt-image-2.6-sunburst`.
+Use `openai_image_generate_webp_responses_api` to generate and deliver lossless static WebP with OpenAI Responses API and `gpt-image-2.6-sunburst`.
 
 ## Parameters
 
