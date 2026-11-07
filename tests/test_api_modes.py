@@ -123,7 +123,7 @@ async def test_preferred_modes_route_both_apis_and_share_quota(
             arguments["description"] = "cat"
         calls.append(tool.call(context, **arguments))
     results = await asyncio.gather(*calls)
-    assert all("queued in the background" in result for result in results)
+    assert all("request body was sent successfully" in result for result in results)
     for tool in tools:
         arguments = {"prompt": {"text": "cat"}}
         if tool.api_name == "image":

@@ -6,6 +6,6 @@ An AstrBot plugin for generating images from text and references through OpenAI 
 
 Requires an `OPENAI_API_KEY` in the plugin settings or environment variable.
 
-Generates lossless static WebP in the background and delivers results after the agent's reply. Keeps request and image archives, with quotas, proxies, and storage cleanup. Responses API can continue edits using archived response IDs.
+Generates lossless static WebP in the background. Keeps request and image archives, with quotas, proxies, and storage cleanup. Responses API can continue edits using archived response IDs.
 
 Agents can choose the model, size, quality, complexity, transparency, and image count per request.

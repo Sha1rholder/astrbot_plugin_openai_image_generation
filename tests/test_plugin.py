@@ -231,7 +231,7 @@ async def test_generation_rechecks_key_before_enqueueing(service, event):
     service.api.generate = AsyncMock()
     result = await service.generate(event, ARGUMENTS)
     assert "no usable OPENAI_API_KEY" in result
-    assert "queued in the background" not in result
+    assert "request body was sent successfully" not in result
     assert not service._tasks
     assert (service.output_dir / "0" / "request.yaml").is_file()
     assert (service.requests_dir / "123456.log").is_file()
@@ -263,7 +263,7 @@ async def test_only_selected_references_are_loaded(
     result = await service.generate(
         event, {**ARGUMENTS, "prompt": {"text": "cat", "images": indices}}
     )
-    assert "queued in the background" in result
+    assert "request body was sent successfully" in result
     await finish_turn()
     if indices:
         loader.assert_awaited_once_with(second)
@@ -274,9 +274,7 @@ async def test_only_selected_references_are_loaded(
 
 
 @pytest.mark.asyncio
-async def test_reference_loading_failure_prevents_api_call(
-    service, event, monkeypatch, finish_turn
-):
+async def test_reference_loading_failure_prevents_api_call(service, event, monkeypatch):
     """Verify attachment loading errors prevent API calls without exposing private paths."""
     event.get_messages.return_value = [Image.fromBase64("one")]
     monkeypatch.setattr(
@@ -284,12 +282,12 @@ async def test_reference_loading_failure_prevents_api_call(
     )
     service.api.generate = AsyncMock()
     result = await service.generate(event, {"prompt": {"text": "cat", "images": [1]}})
-    assert "queued in the background" in result
-    await finish_turn()
-    result = service.context.send_message.call_args.args[1]
     assert "No API request" in result
+    assert "request body was sent successfully" not in result
     assert "private path" not in result
     service.api.generate.assert_not_awaited()
+    service.context.send_message.assert_not_awaited()
+    assert not service._pending_requests
 
 
 @pytest.mark.asyncio
@@ -306,7 +304,7 @@ async def test_combined_delivery_failure_never_regenerates(
         event,
         {"prompt": {"text": "cat"}, "number_of_images": 2},
     )
-    assert "queued in the background" in result
+    assert "request body was sent successfully" in result
     await finish_turn()
     service.logger.warning.assert_called_once()
     assert "Delivery status is unknown" in service.logger.warning.call_args.args[0]
@@ -411,7 +409,7 @@ async def test_astrbot_executor_to_http_to_delivery(
     assert generation_result is not None
     generation_content = generation_result.content[0]
     assert isinstance(generation_content, TextContent)
-    assert "queued in the background" in generation_content.text
+    assert "request body was sent successfully" in generation_content.text
     await finish_turn()
     assert len(requests) == 1
     body = json.loads(requests[0].content)
@@ -476,29 +474,31 @@ async def test_retention_waits_for_delivery(service, event, monkeypatch, finish_
         archive_size = (service.output_dir / "0" / "request.yaml").stat().st_size
         monkeypatch.setattr(service.api, "storage_limit", lambda: archive_size + 1)
         result = await service.generate(event, arguments)
-        assert "queued in the background" in result
-        await asyncio.sleep(0)
+        assert "No API request was made" in result
         assert (service.output_dir / "0" / "0.webp").is_file()
         assert (service.output_dir / "1" / "request.yaml").is_file()
         assert not (service.output_dir / "1" / "0.webp").exists()
         release.set()
         await finish_turn()
+        result = await service.generate(event, arguments)
+        assert "request body was sent successfully" in result
+        await finish_turn()
         assert not (service.output_dir / "0").exists()
-        assert (service.output_dir / "1" / "0.webp").is_file()
+        assert (service.output_dir / "2" / "0.webp").is_file()
     finally:
         release.set()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_stage", ["reference", "api"])
-async def test_tool_returns_before_background_work_finishes(
+async def test_tool_blocks_until_reference_loading_and_api_submission(
     service, event, monkeypatch, tmp_path, blocked_stage
 ):
-    """The actual tool returns while slow work remains pending and later sends exactly once."""
+    """Slow references and API submission must block the actual tool acknowledgement."""
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_work(*_args):
+    async def slow_work(*_args, **_kwargs):
         entered.set()
         await release.wait()
         return (
@@ -527,17 +527,16 @@ async def test_tool_returns_before_background_work_finishes(
     )
     tool = service.context.add_llm_tools.call_args.args[1]
     origin = event.unified_msg_origin
+    call = asyncio.create_task(tool.call(context, **arguments))
     try:
-        result = await asyncio.wait_for(tool.call(context, **arguments), timeout=1)
-        assert "queued in the background" in result
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert not call.done()
         directory = service.output_dir / "0"
         assert (
             yaml.safe_load((directory / "request.yaml").read_text())["request"]
             == arguments
         )
         assert {path.name for path in directory.iterdir()} == {"request.yaml"}
-        assert "Reply to the user now" in result
-        await asyncio.wait_for(entered.wait(), timeout=1)
         service.context.send_message.assert_not_awaited()
         assert len(service._tasks) == 1
         # Later event or caller changes cannot redirect or rewrite the queued job.
@@ -545,6 +544,9 @@ async def test_tool_returns_before_background_work_finishes(
         event.get_messages.return_value = []
         arguments["prompt"]["text"] = "changed"
         release.set()
+        result = await asyncio.wait_for(call, timeout=1)
+        assert "request body was sent successfully" in result
+        assert "Reply to the user now" in result
         await service.mark_agent_finished(event)
         await service.release_image_results(event)
         await asyncio.wait_for(asyncio.gather(*service._tasks), timeout=1)
@@ -556,6 +558,7 @@ async def test_tool_returns_before_background_work_finishes(
         assert service.context.send_message.call_args.args[0] == origin
     finally:
         release.set()
+        await asyncio.gather(call, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -566,7 +569,7 @@ async def test_terminate_cancels_running_and_queued_jobs_before_closing(
     entered = asyncio.Event()
     cancelled = asyncio.Event()
 
-    async def slow_generate(*_args):
+    async def slow_generate(*_args, **_kwargs):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -579,9 +582,18 @@ async def test_terminate_cancels_running_and_queued_jobs_before_closing(
 
     service.api.generate = AsyncMock(side_effect=slow_generate)
     service.api.close = AsyncMock(side_effect=close)
-    await service.generate(event, ARGUMENTS)
+    first = asyncio.create_task(service.generate(event, ARGUMENTS))
     await asyncio.wait_for(entered.wait(), timeout=1)
-    await service.generate(event, ARGUMENTS)
+    queued = asyncio.Event()
+    run = service._run_generation
+
+    async def run_second(*args):
+        queued.set()
+        await run(*args)
+
+    service._run_generation = run_second
+    second = asyncio.create_task(service.generate(event, ARGUMENTS))
+    await asyncio.wait_for(queued.wait(), 1)
     tasks = list(service._tasks)
     assert len(tasks) == 2
     await asyncio.wait_for(plugin.terminate(), timeout=1)
@@ -591,6 +603,9 @@ async def test_terminate_cancels_running_and_queued_jobs_before_closing(
     service.context.send_message.assert_not_awaited()
     assert "shutting down" in await service.generate(event, ARGUMENTS)
     assert not service._tasks
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    assert not service._pending_requests
 
 
 @pytest.mark.asyncio
@@ -604,17 +619,30 @@ async def test_terminate_cancels_running_and_queued_jobs_before_closing(
         (RuntimeError("private upstream response"), "unexpected error"),
     ],
 )
-async def test_background_failures_notify_original_conversation(
-    service, event, error, expected, finish_turn
+@pytest.mark.parametrize("sent", [False, True])
+async def test_failures_return_to_model_before_submission_or_deliver_afterwards(
+    service, event, error, expected, finish_turn, sent
 ):
     """Background errors reach the user without leaking exception details or retrying."""
-    service.api.generate = AsyncMock(side_effect=error)
-    await service.generate(event, ARGUMENTS)
+
+    async def fail(*args, on_request_sent, **kwargs):
+        if sent:
+            on_request_sent()
+        raise error
+
+    service.api.generate = AsyncMock(side_effect=fail)
+    result = await service.generate(event, ARGUMENTS)
     await finish_turn()
     service.api.generate.assert_awaited_once()
-    service.context.send_message.assert_awaited_once()
-    origin, message = service.context.send_message.call_args.args
-    assert origin == event.unified_msg_origin
+    if sent:
+        assert "request body was sent successfully" in result
+        service.context.send_message.assert_awaited_once()
+        origin, message = service.context.send_message.call_args.args
+        assert origin == event.unified_msg_origin
+    else:
+        service.context.send_message.assert_not_awaited()
+        assert "request body was sent successfully" not in result
+        message = result
     assert expected in message
     assert "private" not in message
     if isinstance(error, httpx.RequestError):
@@ -680,7 +708,7 @@ async def test_request_history_uses_event_identity_and_survives_failure(
     monkeypatch.setattr(time, "time", lambda: 1_800_000_000)
     service.api.generate = AsyncMock(side_effect=httpx.ConnectError("offline"))
     result = await service.generate(event, ARGUMENTS)
-    assert "queued in the background" in result
+    assert "connection failed" in result
     await finish_turn()
     archive = yaml.safe_load((service.output_dir / "0" / "request.yaml").read_text())
     assert archive["user_id"] == event.get_sender_id.return_value
@@ -716,12 +744,15 @@ async def test_ready_results_wait_for_final_reply(
     """Neither intermediate messages nor agent completion alone permit delivery."""
     event.get_platform_name.return_value = platform
     service.api.generate = AsyncMock(return_value=[])
-    if outcome == "api_error":
-        service.api.generate.side_effect = plugin_module.ImageGenerationError(
-            "HTTP 400"
-        )
-    elif outcome == "unexpected_error":
-        service.api.generate.side_effect = RuntimeError("private details")
+    if outcome != "success":
+
+        async def fail(*args, on_request_sent, **kwargs):
+            on_request_sent()
+            if outcome == "api_error":
+                raise plugin_module.ImageGenerationError("HTTP 400")
+            raise RuntimeError("private details")
+
+        service.api.generate.side_effect = fail
     ready = asyncio.Event()
     original = service._generate
 
@@ -732,7 +763,7 @@ async def test_ready_results_wait_for_final_reply(
             ready.set()
 
     service._generate = prepare
-    assert "queued in the background" in await service.generate(
+    assert "request body was sent successfully" in await service.generate(
         event,
         {
             **ARGUMENTS,
@@ -779,7 +810,7 @@ async def test_pipeline_completion_releases_without_final_message(
 
     async def pipeline():
         await plugin.add_image_hint(event, ProviderRequest())
-        assert "queued in the background" in await service.generate(
+        assert "request body was sent successfully" in await service.generate(
             event,
             {
                 **ARGUMENTS,
@@ -804,7 +835,7 @@ async def test_pipeline_completion_releases_without_final_message(
 @pytest.mark.asyncio
 async def test_unload_cancels_result_waiting_for_reply(plugin, service, event):
     service.api.generate = AsyncMock(return_value=[])
-    assert "queued in the background" in await service.generate(
+    assert "request body was sent successfully" in await service.generate(
         event,
         {
             **ARGUMENTS,

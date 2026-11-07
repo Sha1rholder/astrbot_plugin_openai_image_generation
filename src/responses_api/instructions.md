@@ -22,11 +22,11 @@ The instructions tool lists available image indices below. Indices start at 1, w
 {"prompt":{"text":"把图改为水彩画风","images":[1]}}
 ```
 
-A queued result means generation is running in the background. Acknowledge the request once. The Responses API describes the generated images after generation. Its returned text and all images will be delivered together when ready. Wait for that delivery before claiming completion.
+The tool blocks until the API request body is sent or an earlier failure is known. A sent status confirms transmission only, not server acceptance or completed generation. Acknowledge the sent request once without claiming completion; do not wait or call the tool again. On failure, explain the tool error instead of claiming submission. The Responses API describes the generated images after generation. Its returned text and all images will be delivered together when ready. Only claim completion after the results have actually been delivered.
 
 ## Previous requests
 
-Search the archive directory shown below with `rg -n -i -F -g request.yaml -- 'keyword' 'ARCHIVE_DIR'`. Each numbered directory contains the original arguments in `request.yaml`. The queued acknowledgement gives the exact archive path for that request. Successful generations also contain `0.webp`, `1.webp`, etc. Verify that image files exist before sending them.
+Search the archive directory shown below with `rg -n -i -F -g request.yaml -- 'keyword' 'ARCHIVE_DIR'`. Each numbered directory contains the original arguments in `request.yaml`. The submission acknowledgement gives the exact archive path for that request. Successful generations also contain `0.webp`, `1.webp`, etc. Verify that image files exist before sending them.
 
 After a successful Responses API generation, `request.yaml` also contains a top-level `response_id` when the provider returns one. For a follow-up edit, read the archive corresponding to the user's intended image and pass that ID as `previous_response_id`. Do not reuse `request.previous_response_id`, which points to the parent response. No previous response is selected automatically. Wait for generation to finish before reading the new ID.
 

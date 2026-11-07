@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,7 @@ class ImageService:
         self._enqueue_lock = asyncio.Lock()
         self._generation_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._pending_requests: set[int] = set()
         self._turn_finished: WeakKeyDictionary[AstrMessageEvent, asyncio.Event] = (
             WeakKeyDictionary()
         )
@@ -165,7 +167,7 @@ class ImageService:
         arguments: dict[str, Any],
         api_name: str | None = None,
     ) -> str:
-        """Enqueue a request without waiting for reference loading or generation.
+        """Wait for request transmission or failure, then continue in the background.
 
         Args:
             event: Original message and destination for the background result.
@@ -173,7 +175,7 @@ class ImageService:
             api_name: Backend selected by the tool, or the configured preference.
 
         Returns:
-            A queued acknowledgement or an immediate validation error.
+            A transmission acknowledgement or an error before submission.
         """
         api = self.apis[api_name or self.preferred_api]
         if api.api_name not in (self.preferred_api, self.alternative_api):
@@ -191,8 +193,7 @@ class ImageService:
             return str(exc)
         references = self.reference_images(event)
         origin = event.unified_msg_origin
-        # Keep reservation order and background execution order identical so later
-        # requests cannot prune an earlier request that has not run yet.
+        # Reserve and enqueue in the same order; protect archives until delivery.
         async with self._enqueue_lock:
             if self._stopping:
                 return "The image plugin is shutting down. No image task was queued."
@@ -223,6 +224,10 @@ class ImageService:
             if any(index > len(references) for index in indices):
                 return f"Reference image index does not exist. Call {self.instruction_tools[api.api_name].name} for available indices."
             selected = [(index, references[index - 1]) for index in indices]
+            submitted: asyncio.Future[str | None] = (
+                asyncio.get_running_loop().create_future()
+            )
+            self._pending_requests.add(int(request_dir.name))
             task = asyncio.create_task(
                 self._run_generation(
                     event,
@@ -233,12 +238,34 @@ class ImageService:
                     request_dir,
                     self._turn_finished.setdefault(event, asyncio.Event()),
                     api,
+                    submitted,
                 )
             )
             self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+
+            def task_finished(completed: asyncio.Task[None]) -> None:
+                """Release waiters even if unloading cancels a task before it starts."""
+                self._tasks.discard(completed)
+                self._pending_requests.discard(int(request_dir.name))
+                if not submitted.done():
+                    submitted.cancel()
+
+            task.add_done_callback(task_finished)
+        try:
+            error = await asyncio.shield(submitted)
+        except asyncio.CancelledError:
+            # A tool timeout must not leave an unsubmitted job to start later.
+            # Once sent, keep collecting the result without retrying the request.
+            if not submitted.done() or submitted.cancelled():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
+        if error is not None:
+            return error
         return (
-            "Image generation queued in the background. Reply to the user now with a brief acknowledgement; "
+            "The image API request body was sent successfully; this does not confirm server acceptance "
+            "or completed generation. Generation continues in the background. "
+            "Reply to the user now with a brief acknowledgement that the request was sent; "
             "do not wait or call the tool again for this request. The description and images will be sent "
             "automatically to this conversation when ready and after your reply finishes. "
             "If generation fails, a failure notification will also wait until your reply finishes. "
@@ -256,8 +283,9 @@ class ImageService:
         request_dir: Path,
         turn_finished: asyncio.Event,
         api: BaseImageAPI,
+        submitted: asyncio.Future[str | None],
     ) -> None:
-        """Serialize generation and delivery to protect pending files from retention.
+        """Report submission or failure and deliver later results after the reply.
 
         Args:
             event: Original event used for result builders and QQ reply credentials.
@@ -268,36 +296,59 @@ class ImageService:
             request_dir: Numbered directory reserved before the tool acknowledgement.
             turn_finished: Gate released only after the foreground reply finishes.
             api: Backend captured when the request was accepted.
+            submitted: Resolves to None after transmission or an earlier error.
         """
+
+        def request_sent() -> None:
+            """Release the tool only when the transport confirms submission."""
+            if not submitted.done():
+                submitted.set_result(None)
+
         async with self._generation_lock:
             try:
                 message = await self._generate(
-                    event, arguments, payload, references, request_dir, api
+                    event,
+                    arguments,
+                    payload,
+                    references,
+                    request_dir,
+                    api,
+                    request_sent,
                 )
             except Exception as exc:
                 self.logger.error(
                     "Background image generation failed: %s", type(exc).__name__
                 )
-                message = event.plain_result(
+                message = (
                     "Image generation encountered an unexpected error. Completion is unknown. "
                     "Check plugin logs. Do not automatically retry."
                 )
-            # Keep the retention lock until delivery so pending files cannot be pruned.
-            await turn_finished.wait()
-            try:
-                # QQ Official requires the original event for reply credentials.
-                # Other adapters use proactive delivery after the agent turn ends.
-                if event.get_platform_name() == "qq_official":
-                    await event.send(message)
-                elif not await self.context.send_message(origin, message):
-                    raise RuntimeError("Destination platform is unavailable")
-            except Exception as exc:
-                self.logger.warning(
-                    "Background image result delivery failed: %s. Delivery status is unknown; "
-                    "no automatic retry. Generated files, if any, remain in %s",
-                    type(exc).__name__,
-                    self.output_dir,
-                )
+            if not submitted.done():
+                # Pre-submission errors belong to the tool result, not a
+                # separate message delayed until after the agent's reply.
+                if isinstance(message, str):
+                    submitted.set_result(message)
+                    return
+                request_sent()
+        # Do not hold the generation lock while awaiting the agent: it may
+        # call another image tool before finishing this same turn.
+        await turn_finished.wait()
+        if isinstance(message, str):
+            message = event.plain_result(message)
+        try:
+            # QQ Official requires the original event for reply credentials.
+            # Other adapters use proactive delivery after the agent turn ends.
+            if event.get_platform_name() == "qq_official":
+                await event.send(message)
+            elif not await self.context.send_message(origin, message):
+                raise RuntimeError("Destination platform is unavailable")
+        except Exception as exc:
+            self.logger.warning(
+                "Background image result delivery failed: %s. Delivery status is unknown; "
+                "no automatic retry. Generated files, if any, remain in %s",
+                type(exc).__name__,
+                self.output_dir,
+            )
 
     async def _generate(
         self,
@@ -307,7 +358,8 @@ class ImageService:
         references: list[tuple[int, MessageImage]],
         request_dir: Path,
         api: BaseImageAPI,
-    ) -> MessageEventResult:
+        on_request_sent: Callable[[], None],
+    ) -> MessageEventResult | str:
         """Prepare a background success or failure message without retrying generation.
 
         Args:
@@ -317,6 +369,7 @@ class ImageService:
             references: Selected reference indices and attachment snapshots.
             request_dir: Existing directory containing the original request.
             api: Backend captured when the request was accepted.
+            on_request_sent: Callback after the API request body is transmitted.
 
         Returns:
             A combined image message or a safe failure notification.
@@ -334,27 +387,25 @@ class ImageService:
                     self.logger.warning(
                         "Reference image loading failed: %s", type(exc).__name__
                     )
-                    return event.plain_result(
-                        f"Could not read reference image {index}. Please resend it. No API request was made."
-                    )
+                    return f"Could not read reference image {index}. Please resend it. No API request was made."
             paths = await api.generate(
-                payload, encoded_images, self.output_dir, arguments, request_dir
+                payload,
+                encoded_images,
+                self.output_dir,
+                arguments,
+                request_dir,
+                on_request_sent=on_request_sent,
+                retention_floor=min(self._pending_requests),
             )
         except ImageGenerationError as exc:
-            return event.plain_result(str(exc))
+            return str(exc)
         except httpx.TimeoutException:
-            return event.plain_result(
-                "Image request timed out. The server may still be generating. Do not automatically retry: it may incur duplicate charges."
-            )
+            return "Image request timed out. The server may still be generating. Do not automatically retry: it may incur duplicate charges."
         except httpx.RequestError:
-            return event.plain_result(
-                "Image service connection failed; completion is unknown. Check the network. Do not automatically retry."
-            )
+            return "Image service connection failed; completion is unknown. Check the network. Do not automatically retry."
         except OSError as exc:
             self.logger.error("Image storage failed: %s", type(exc).__name__)
-            return event.plain_result(
-                "Could not read or save image files. Check disk space and plugin data directory permissions."
-            )
+            return "Could not read or save image files. Check disk space and plugin data directory permissions."
 
         return event.chain_result(
             [

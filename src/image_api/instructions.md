@@ -46,7 +46,7 @@ Maximum quality:
 
 In most cases, your prompt should be much longer with more detailed descriptions.
 
-When the tool returns a queued status, generation is running in the background and the images have not been delivered yet. Your description and generated images will be automatically sent together after generation completes.
+The tool blocks until the API request body is sent or an earlier failure is known. A sent status confirms transmission only, not server acceptance or completed generation. Acknowledge the sent request once without claiming completion; do not wait or call the tool again. On failure, explain the tool error instead of claiming submission. Your description and generated images will be automatically sent together after generation completes.
 
 ## Finding previous requests
 

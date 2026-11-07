@@ -14,7 +14,7 @@ import stat
 import tempfile
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -245,11 +245,27 @@ class BaseImageAPI(ABC):
         output_dir: Path,
         arguments: dict[str, Any],
         request_dir: Path | None = None,
+        *,
+        on_request_sent: Callable[[], None] | None = None,
+        retention_floor: int | None = None,
     ) -> list[Path]:
         """Call the selected API once and save outputs in the reserved request directory.
 
         Direct callers may omit request_dir to archive arguments before the HTTP call.
         Failed requests retain their archive for inspection.
+
+        Args:
+            payload: Validated backend request options.
+            references: Base64 reference images to validate before submission.
+            output_dir: Root directory containing numbered request archives.
+            arguments: Original tool arguments to archive with the result.
+            request_dir: Previously reserved archive, if any.
+            on_request_sent: Called only after the API request body is sent. This
+                confirms transmission, not server acceptance or image generation.
+            retention_floor: Oldest request still awaiting generation or delivery.
+
+        Returns:
+            Saved image paths and the response description.
         """
         arguments = deepcopy(arguments)
         self.prepare(arguments)
@@ -296,12 +312,38 @@ class BaseImageAPI(ABC):
             )
         images = await asyncio.to_thread(self.reference_payload, references)
         endpoint, body = self.build_request(payload, images)
-        # Generation and delivery are serialized by the plugin. Keep this request
-        # and all later queued archives; only earlier requests can be removed.
+        # Delivery can overlap later generations. Protect all pending archives,
+        # including images still waiting for the agent's final reply.
         await asyncio.to_thread(
-            self.prune_requests, output_dir, limit, int(request_dir.name)
+            self.prune_requests,
+            output_dir,
+            limit,
+            int(request_dir.name) if retention_floor is None else retention_floor,
         )
-        response = await self.client.post(endpoint, json=body)
+        sending_api_request = False
+
+        async def trace(name: str, info: dict[str, Any]) -> None:
+            """Report completed POST transmission, excluding proxy CONNECT traffic."""
+            nonlocal sending_api_request
+            if name in (
+                "http11.send_request_body.started",
+                "http2.send_request_body.started",
+            ):
+                sending_api_request = info["request"].method == b"POST"
+            elif (
+                name
+                in (
+                    "http11.send_request_body.complete",
+                    "http2.send_request_body.complete",
+                )
+                and sending_api_request
+                and on_request_sent is not None
+            ):
+                on_request_sent()
+
+        response = await self.client.post(
+            endpoint, json=body, extensions={"trace": trace}
+        )
         if not response.is_success:
             explanation = {
                 400: "The service rejected the parameters or content. Check model access, prompt and arguments.",
@@ -318,6 +360,10 @@ class BaseImageAPI(ABC):
             raise ImageGenerationError(
                 f"Image generation failed (HTTP {response.status_code}): {explanation} Do not automatically retry."
             )
+        # Custom transports may not emit HTTPcore traces. A successful response
+        # also proves submission, but never acknowledge merely entering post().
+        if on_request_sent is not None:
+            on_request_sent()
         try:
             result = response.json()
         except ValueError:
