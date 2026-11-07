@@ -1,3 +1,7 @@
+"""Share generation validation, HTTP transport, archives and tool dispatch."""
+
+from __future__ import annotations
+
 import asyncio
 import base64
 import binascii
@@ -9,7 +13,8 @@ import shutil
 import stat
 import tempfile
 import threading
-from collections.abc import Mapping
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -23,7 +28,6 @@ from PIL import Image, UnidentifiedImageError
 REQUEST_SCHEMA: dict[str, Any] = json.loads(
     Path(__file__).with_name("request.schema.json").read_text(encoding="utf-8")
 )
-INPUT_SCHEMA: dict[str, Any] = REQUEST_SCHEMA["properties"]["request"]
 
 
 STORAGE_LOCK = threading.Lock()
@@ -33,7 +37,24 @@ class ImageGenerationError(Exception):
     """An image generation error safe to return to the language model."""
 
 
-class ImageAPI:
+class GeneratedImages(list[Path]):
+    """Saved image paths with the caption belonging to this response."""
+
+    def __init__(self, paths: list[Path], description: str) -> None:
+        super().__init__(paths)
+        self.description = description
+
+
+class BaseImageAPI(ABC):
+    """Share transport and storage while subclasses define each API contract."""
+
+    api_name: str
+    generation_tool_name: str
+    instructions_tool_name: str
+    guide: str
+    input_schema: dict[str, Any]
+    tool_description: str
+
     def __init__(self, config: Mapping[str, Any], plugin_dir: Path) -> None:
         """Store configuration and the plugin directory for lazy HTTP client initialization."""
         self.config = config
@@ -78,32 +99,38 @@ class ImageAPI:
                 "Configure api_key in the plugin settings, or provide the OPENAI_API_KEY environment variable. "
                 "Tell the user that image generation cannot start until an API key is configured. "
                 "Do not call the generation tool or claim that a request was submitted or queued. "
-                "No Image API request was made by this call."
+                "No API request was made by this call."
             )
         return api_key
 
-    @staticmethod
-    def prepare(arguments: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
-        """Validate tool arguments before constructing the Image API request.
+    @abstractmethod
+    def prepare(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
+        """Validate arguments and build the backend-specific request payload."""
+        raise NotImplementedError
+
+    def prepare_image_options(
+        self, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[int]]:
+        """Validate tool arguments and build shared image rendering options.
 
         Args:
             arguments: Untrusted model-supplied arguments.
 
         Returns:
-            The API payload and the selected attachment indices.
+            Image rendering options and the selected attachment indices.
 
         Raises:
             ImageGenerationError: If any argument violates the supported contract.
         """
         try:
-            jsonschema.validate(arguments, INPUT_SCHEMA)
+            jsonschema.validate(arguments, self.input_schema)
         except jsonschema.ValidationError as exc:
             location = ".".join(map(str, exc.absolute_path)) or "arguments"
             # Do not echo potentially sensitive or very large argument values.
             raise ImageGenerationError(
                 f"Invalid image arguments: {location} violates the {exc.validator} constraint. Read the usage instructions."
             ) from None
-        if not arguments["description"].strip():
+        if "description" in arguments and not arguments["description"].strip():
             raise ImageGenerationError("The image description must not be blank.")
         prompt = arguments["prompt"]["text"].strip()
         if not prompt:
@@ -128,21 +155,20 @@ class ImageAPI:
                     "Image pixel count must be between 655,360 and 8,294,400."
                 )
             api_size = f"{width}x{height}"
-        payload: dict[str, Any] = {
+        image_options = {
             "model": "gpt-image-2.6-" + (arguments.get("model") or "sunburst"),
-            "prompt": prompt,
             "size": api_size,
             "quality": arguments.get("quality") or "auto",
             "complexity": arguments.get("complexity") or "high",
             "background": arguments.get("background_transparency") or "auto",
-            "n": int(arguments.get("number_of_images") or 1),
             "output_format": "webp",
             "output_compression": 100,
             "moderation": "low",
             "partial_images": 0,
-            "stream": False,
         }
-        return payload, [int(index) for index in arguments["prompt"].get("images", [])]
+        return image_options, [
+            int(index) for index in arguments["prompt"].get("images", [])
+        ]
 
     def storage_limit(self) -> int:
         """Return the configured storage limit in bytes (decimal GB)."""
@@ -182,9 +208,13 @@ class ImageAPI:
                 raise ValueError
         except (OSError, yaml.YAMLError, KeyError, TypeError, ValueError):
             raise ImageGenerationError(
-                "Cannot read the plugin version from metadata.yaml. No Image API request was made."
+                "Cannot read the plugin version from metadata.yaml. No API request was made."
             ) from None
-        archive = {"plugin_version": version, "request": arguments}
+        archive = {
+            "plugin_version": version,
+            "api": self.api_name,
+            "request": arguments,
+        }
         if user_id is not None:
             archive["user_id"] = user_id
         with STORAGE_LOCK:
@@ -215,11 +245,27 @@ class ImageAPI:
         output_dir: Path,
         arguments: dict[str, Any],
         request_dir: Path | None = None,
+        *,
+        on_request_sent: Callable[[], None] | None = None,
+        retention_floor: int | None = None,
     ) -> list[Path]:
-        """Call Image API once and save outputs in the reserved request directory.
+        """Call the selected API once and save outputs in the reserved request directory.
 
         Direct callers may omit request_dir to archive arguments before the HTTP call.
         Failed requests retain their archive for inspection.
+
+        Args:
+            payload: Validated backend request options.
+            references: Base64 reference images to validate before submission.
+            output_dir: Root directory containing numbered request archives.
+            arguments: Original tool arguments to archive with the result.
+            request_dir: Previously reserved archive, if any.
+            on_request_sent: Called only after the API request body is sent. This
+                confirms transmission, not server acceptance or image generation.
+            retention_floor: Oldest request still awaiting generation or delivery.
+
+        Returns:
+            Saved image paths and the response description.
         """
         arguments = deepcopy(arguments)
         self.prepare(arguments)
@@ -264,17 +310,40 @@ class ImageAPI:
                 timeout=httpx.Timeout(timeout, connect=30),
                 follow_redirects=False,
             )
-        body = dict(payload)
-        endpoint = "images/generations"
-        if references:
-            endpoint = "images/edits"
-            body["images"] = await asyncio.to_thread(self.reference_payload, references)
-        # Generation and delivery are serialized by the plugin. Keep this request
-        # and all later queued archives; only earlier requests can be removed.
+        images = await asyncio.to_thread(self.reference_payload, references)
+        endpoint, body = self.build_request(payload, images)
+        # Delivery can overlap later generations. Protect all pending archives,
+        # including images still waiting for the agent's final reply.
         await asyncio.to_thread(
-            self.prune_requests, output_dir, limit, int(request_dir.name)
+            self.prune_requests,
+            output_dir,
+            limit,
+            int(request_dir.name) if retention_floor is None else retention_floor,
         )
-        response = await self.client.post(endpoint, json=body)
+        sending_api_request = False
+
+        async def trace(name: str, info: dict[str, Any]) -> None:
+            """Report completed POST transmission, excluding proxy CONNECT traffic."""
+            nonlocal sending_api_request
+            if name in (
+                "http11.send_request_body.started",
+                "http2.send_request_body.started",
+            ):
+                sending_api_request = info["request"].method == b"POST"
+            elif (
+                name
+                in (
+                    "http11.send_request_body.complete",
+                    "http2.send_request_body.complete",
+                )
+                and sending_api_request
+                and on_request_sent is not None
+            ):
+                on_request_sent()
+
+        response = await self.client.post(
+            endpoint, json=body, extensions={"trace": trace}
+        )
         if not response.is_success:
             explanation = {
                 400: "The service rejected the parameters or content. Check model access, prompt and arguments.",
@@ -283,9 +352,18 @@ class ImageAPI:
                 404: "The model or endpoint is unavailable. Check base_url and account access.",
                 429: "Rate limit or quota exceeded. Check the account limits and balance.",
             }.get(response.status_code, "The image service returned an error.")
+            if body.get("previous_response_id") and response.status_code in (400, 404):
+                explanation += (
+                    " The previous response may have expired or may be unavailable on this endpoint/account. "
+                    "If it is unavailable, ask the user to resend or quote the image for a new request."
+                )
             raise ImageGenerationError(
                 f"Image generation failed (HTTP {response.status_code}): {explanation} Do not automatically retry."
             )
+        # Custom transports may not emit HTTPcore traces. A successful response
+        # also proves submission, but never acknowledge merely entering post().
+        if on_request_sent is not None:
+            on_request_sent()
         try:
             result = response.json()
         except ValueError:
@@ -293,9 +371,27 @@ class ImageAPI:
                 "The image service returned invalid JSON. Do not automatically retry."
             ) from None
         paths = await asyncio.to_thread(
-            self.save_images, result, request_dir, payload["n"]
+            self.save_images,
+            result,
+            request_dir,
+            int(arguments.get("number_of_images") or 1),
         )
-        return paths
+
+        return GeneratedImages(paths, self.response_description(result, arguments))
+
+    @staticmethod
+    @abstractmethod
+    def response_description(result: object, arguments: dict[str, Any]) -> str:
+        """Extract the caption associated with this backend's response."""
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def build_request(
+        payload: dict[str, Any], images: list[dict[str, str]]
+    ) -> tuple[str, dict[str, Any]]:
+        """Choose the backend endpoint and attach validated reference images."""
+        raise NotImplementedError
 
     @staticmethod
     def reference_payload(references: list[str]) -> list[dict[str, str]]:
@@ -336,7 +432,14 @@ class ImageAPI:
         return images
 
     @staticmethod
+    @abstractmethod
+    def image_results(result: object) -> list[Any]:
+        """Extract encoded images from the backend-specific response format."""
+        raise NotImplementedError
+
+    @classmethod
     def save_images(
+        cls,
         result: object,
         request_dir: Path,
         requested: int,
@@ -355,15 +458,14 @@ class ImageAPI:
             ImageGenerationError: If the service did not return valid WebP images.
             OSError: If files cannot be written.
         """
-        data = result.get("data") if isinstance(result, dict) else None
-        if not isinstance(data, list) or not 1 <= len(data) <= requested:
+        data = cls.image_results(result)
+        if not 1 <= len(data) <= requested:
             raise ImageGenerationError(
                 "The image service returned no valid image list. Do not automatically retry."
             )
         decoded: list[bytes] = []
-        for item in data:
+        for encoded in data:
             try:
-                encoded = item.get("b64_json") if isinstance(item, dict) else None
                 if not isinstance(encoded, str) or not encoded:
                     raise ValueError
                 raw = base64.b64decode(encoded, validate=True)
@@ -412,7 +514,7 @@ class ImageAPI:
             for entry in entries:
                 info = entry.stat(follow_symlinks=False)
                 if stat.S_ISDIR(info.st_mode):
-                    total += ImageAPI.storage_size(Path(entry.path))
+                    total += BaseImageAPI.storage_size(Path(entry.path))
                 elif stat.S_ISREG(info.st_mode):
                     total += info.st_size
         return total
@@ -421,7 +523,7 @@ class ImageAPI:
     def prune_requests(output_dir: Path, limit: int, current_id: int) -> None:
         """On overflow, remove oldest completed archives until below the limit."""
         with STORAGE_LOCK:
-            total = ImageAPI.storage_size(output_dir)
+            total = BaseImageAPI.storage_size(output_dir)
             if total <= limit:
                 return
             directories = sorted(
@@ -438,7 +540,7 @@ class ImageAPI:
                 key=lambda directory: int(directory.name),
             )
             for directory in directories:
-                size = ImageAPI.storage_size(directory)
+                size = BaseImageAPI.storage_size(directory)
                 shutil.rmtree(directory)
                 total -= size
                 if total < limit:
@@ -446,7 +548,7 @@ class ImageAPI:
             raise ImageGenerationError(
                 "Image archive storage cannot be reduced below max_storage_gb without "
                 "deleting current or queued requests or unrelated files. Increase the limit "
-                "or free space in the image archive directory. No Image API request was made."
+                "or free space in the image archive directory. No API request was made."
             )
 
     async def close(self) -> None:

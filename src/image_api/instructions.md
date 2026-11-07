@@ -1,19 +1,18 @@
-# Image generation instructions
+# Image generation instructions (Image API)
 
-Use `openai_image_api_generation_webp` to generate and deliver lossless static WebP with OpenAI's latest image generation models, currently `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`. Unless user specifies, in most cases you should omit optional arguments as all have reasonable defaults.
-
-If you've read these instructions, there's no need to call this tool again.
+Use `openai_image_generate_webp_image_api` to generate and deliver lossless static WebP with OpenAI Image API and `gpt-image-2.6-sunburst`.
 
 ## Parameters
 
 - `prompt`: Object with required `text` and optional `images` reference indices
 - `description`: A short description of the images you expect. Automatically sent to the user with all generated images in the same message.
-- (Optional) `model`: `sunburst` offers SOTA quality at higher latency; `flare` is faster. Defaults to `sunburst`.
 - (Optional) `size`: String in `WIDTHxHEIGHT` format such as `1536x1024`. Both dimensions must be multiples of 16 and no greater than 3840. The aspect ratio must be between 1:3 and 3:1. Total pixels must be between 655,360 and 8,294,400. Resolutions above 2560x1440 total pixels are experimental. Automatically selected if omitted.
 - (Optional) `quality`: `low`, `medium`, `high`, `xhigh`, `max`. Defaults to `auto`.
-- (Optional) `complexity`: `low`, `medium`, `high`. Defaults to `high`; set manually only when reducing generation latency is needed.
+- (Optional) `complexity`: `low`, `medium`, `high`. Control how much the image model plans before rendering. Lower complexity can suit focused edits, such as changing a background or a sign. Higher complexity can help with dense text, complex layouts, and relationships between objects. Higher complexity can increase latency and introduce unwanted changes, so compare results for your task. Defaults to `high`.
 - (Optional) `background_transparency`: `opaque` or `transparent`. Defaults to `auto`.
 - (Optional) `number_of_images`: Integer from 1 to 5. Defaults to 1; set manually only when generating multiple images at once.
+
+In most cases you should omit optional arguments as all have reasonable defaults.
 
 ## Reference images
 
@@ -46,8 +45,6 @@ Maximum quality:
 ```
 
 In most cases, your prompt should be much longer with more detailed descriptions.
-
-When the tool returns a queued status, generation is running in the background and the images have not been delivered yet. Your description and generated images will be automatically sent together after generation completes.
 
 ## Finding previous requests
 

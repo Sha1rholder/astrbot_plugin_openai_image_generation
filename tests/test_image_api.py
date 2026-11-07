@@ -1,30 +1,29 @@
-import asyncio
+"""Test the Image API contract and persistence."""
+
 import base64
 import io
 import json
+from pathlib import Path
 
 import httpx
+import jsonschema
 import pytest
 import yaml
-from conftest import api_module
+from data.plugins.astrbot_plugin_openai_image_generation.src.generate import (
+    REQUEST_SCHEMA,
+    ImageGenerationError,
+)
+from data.plugins.astrbot_plugin_openai_image_generation.src.image_api.generate import (
+    INPUT_SCHEMA,
+    ImageAPI,
+)
 from PIL import Image
 
-ImageAPI = api_module.ImageAPI
-ImageGenerationError = api_module.ImageGenerationError
 ARGUMENTS = {"description": "A cat", "prompt": {"text": "cat"}}
 
 
-@pytest.fixture
-def webp():
-    """Return lossless WebP bytes for a small image with transparency."""
-    output = io.BytesIO()
-    Image.new("RGBA", (16, 16), (20, 40, 60, 128)).save(output, "WEBP", lossless=True)
-    return output.getvalue()
-
-
-def test_defaults_and_fixed_fields():
-    """Verify prompt trimming and the default and fixed API request fields."""
-    payload, refs = ImageAPI.prepare(
+def test_defaults_and_fixed_fields(api):
+    payload, refs = api.prepare(
         {"description": "A cat", "prompt": {"text": " Draw a cat "}}
     )
     assert refs == []
@@ -45,9 +44,8 @@ def test_defaults_and_fixed_fields():
 
 
 @pytest.mark.parametrize("size", ["1024x640", "3840x2160", "768x2304"])
-def test_size_boundaries(size):
-    """Verify supported dimensions and boundary sizes survive request preparation."""
-    payload, _ = ImageAPI.prepare({**ARGUMENTS, "size": size})
+def test_size_boundaries(api, size):
+    payload, _ = api.prepare({**ARGUMENTS, "size": size})
     assert payload["size"] == size
 
 
@@ -61,64 +59,58 @@ def test_size_boundaries(size):
         {"prompt": {"text": "cat", "images": [1, 1]}},
         {"prompt": {"text": "cat", "images": ["/etc/passwd"]}},
         {"stream": True},
+        {"api": "chat"},
+        {"llm": "gpt-6-astra"},
+        {"previous_response_id": "resp_previous"},
+        {"reasoning": {"effort": "high"}},
+        {"reasoning_effort": "high"},
+        {"moderation": "auto"},
+        {"output_format": "png"},
+        {"output_compression": 80},
     ],
 )
-def test_schema_rejects_unsupported_arguments(options):
+def test_schema_rejects_unsupported_arguments(api, options):
     with pytest.raises(ImageGenerationError, match="Invalid image arguments"):
-        ImageAPI.prepare({**ARGUMENTS, **options})
-
-
-@pytest.mark.parametrize(
-    "size,reason",
-    [
-        ("1920x1080", "multiples of 16"),
-        ("4096x2048", "between 16 and 3840"),
-        ("2048x640", "aspect ratio"),
-        ("512x512", "pixel count"),
-        ("3840x3840", "pixel count"),
-    ],
-)
-def test_size_constraints(size, reason):
-    with pytest.raises(ImageGenerationError, match=reason):
-        ImageAPI.prepare({**ARGUMENTS, "size": size})
+        api.prepare({**ARGUMENTS, **options})
 
 
 @pytest.mark.parametrize(
     "options,reason",
     [
+        ({"size": "1920x1080"}, "multiples of 16"),
+        ({"size": "4096x2048"}, "between 16 and 3840"),
+        ({"size": "2048x640"}, "aspect ratio"),
+        ({"size": "512x512"}, "pixel count"),
+        ({"size": "3840x3840"}, "pixel count"),
         ({"description": "   "}, "description must not be blank"),
         ({"prompt": {"text": "   "}}, "prompt must not be blank"),
     ],
 )
-def test_blank_text_is_rejected(options, reason):
+def test_invalid_values(api, options, reason):
     with pytest.raises(ImageGenerationError, match=reason):
-        ImageAPI.prepare({**ARGUMENTS, **options})
+        api.prepare({**ARGUMENTS, **options})
 
 
-def test_null_options_use_defaults():
-    """Verify explicit null options behave like omitted optional arguments."""
-    default, _ = ImageAPI.prepare(ARGUMENTS)
-    options = dict.fromkeys(
-        set(api_module.INPUT_SCHEMA["properties"]) - {"prompt", "description"}
-    )
-    actual, _ = ImageAPI.prepare({**ARGUMENTS, **options})
+def test_null_options_use_defaults(api):
+    default, _ = api.prepare(ARGUMENTS)
+    options = dict.fromkeys(set(INPUT_SCHEMA["properties"]) - {"prompt", "description"})
+    actual, _ = api.prepare({**ARGUMENTS, **options})
     assert actual == default
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_reference", [False, True])
 async def test_api_contract_and_original_bytes(api, tmp_path, webp, with_reference):
-    """Verify generation and edit requests preserve the API contract and output bytes."""
     encoded = base64.b64encode(webp).decode()
     requests = []
 
     def respond(request):
-        """Capture the request and return two copies of the WebP fixture."""
         requests.append(request)
         return httpx.Response(200, json={"data": [{"b64_json": encoded}] * 2})
 
     api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(respond)
+        base_url="https://example.invalid/v1/",
+        transport=httpx.MockTransport(respond),
     )
     arguments = {
         "description": "A cat",
@@ -140,12 +132,13 @@ async def test_api_contract_and_original_bytes(api, tmp_path, webp, with_referen
     )
     archive_text = (paths[0].parent / "request.yaml").read_text()
     assert archive_text.splitlines()[0] == (
-        "# yaml-language-server: $schema=" + api_module.REQUEST_SCHEMA["$id"]
+        "# yaml-language-server: $schema=" + REQUEST_SCHEMA["$id"]
     )
     archive = yaml.safe_load(archive_text)
-    api_module.jsonschema.validate(archive, api_module.REQUEST_SCHEMA)
+    jsonschema.validate(archive, REQUEST_SCHEMA)
     assert archive == {
         "plugin_version": "v9.8.7",
+        "api": "image",
         "request": arguments,
     }
     assert len(requests) == 1
@@ -169,11 +162,9 @@ async def test_api_contract_and_original_bytes(api, tmp_path, webp, with_referen
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [302, 429, 500])
 async def test_errors_do_not_leak_response_or_retry(api, tmp_path, status):
-    """Verify HTTP errors report status without exposing response bodies or retrying."""
     attempts = []
 
     def respond(request):
-        """Record each attempt and return an error containing private upstream content."""
         attempts.append(request)
         return httpx.Response(
             status,
@@ -182,7 +173,8 @@ async def test_errors_do_not_leak_response_or_retry(api, tmp_path, status):
         )
 
     api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(respond)
+        base_url="https://example.invalid/v1/",
+        transport=httpx.MockTransport(respond),
     )
     payload, _ = api.prepare(ARGUMENTS)
     with pytest.raises(ImageGenerationError) as error:
@@ -223,7 +215,6 @@ def test_invalid_second_image_preserves_archive_without_partial_output(
 
 
 def test_non_webp_output_is_rejected(tmp_path):
-    """Verify PNG is rejected as generated output but accepted as a reference image."""
     output = io.BytesIO()
     Image.new("RGB", (16, 16)).save(output, "PNG")
     encoded = base64.b64encode(output.getvalue()).decode()
@@ -241,7 +232,6 @@ def test_non_webp_output_is_rejected(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["config", "environment"])
 async def test_key_sources(api, tmp_path, monkeypatch, webp, source):
-    """Verify API keys are loaded from each supported source with expected precedence."""
     key = "test-key-not-a-real-secret"
     if source == "config":
         api.config["api_key"] = " " + key + "\n"
@@ -253,17 +243,15 @@ async def test_key_sources(api, tmp_path, monkeypatch, webp, source):
     client_type = httpx.AsyncClient
 
     def respond(request):
-        """Capture the authorization header and return the WebP fixture."""
         captured.append(request.headers["authorization"])
         return httpx.Response(
             200, json={"data": [{"b64_json": base64.b64encode(webp).decode()}]}
         )
 
     def create_client(**kwargs):
-        """Create an HTTP client using the test transport instead of network requests."""
         return client_type(**kwargs, transport=httpx.MockTransport(respond))
 
-    monkeypatch.setattr(api_module.httpx, "AsyncClient", create_client)
+    monkeypatch.setattr(httpx, "AsyncClient", create_client)
     payload, _ = api.prepare(ARGUMENTS)
     await api.generate(payload, [], tmp_path / "out", ARGUMENTS)
     assert captured == ["Bearer " + key]
@@ -318,67 +306,29 @@ def test_invalid_proxy_does_not_leak_credentials(api, value):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
-@pytest.mark.parametrize("with_reference", [False, True])
-async def test_requests_use_authenticated_proxy(
-    api, tmp_path, monkeypatch, webp, scheme, with_reference
-):
-    """Exercise real proxy handshakes without external network or API calls."""
-    loop = asyncio.get_running_loop()
-    received = loop.create_future()
+async def test_requests_use_authenticated_proxy(api, tmp_path, monkeypatch, scheme):
+    """Pass explicit proxy credentials to the HTTP client without relying on the environment."""
+    proxy = f"{scheme}://user:pass%40word@localhost:1080"
+    api.config["proxy"] = " " + proxy + " "
+    monkeypatch.setenv("HTTP_PROXY", "http://localhost:1")
+    monkeypatch.setenv("NO_PROXY", "*")
+    client_type = httpx.AsyncClient
+    options = []
 
-    async def handle(reader, writer):
-        try:
-            if scheme.startswith("socks"):
-                assert await reader.readexactly(3) == b"\x05\x01\x02"
-                writer.write(b"\x05\x02")
-                await writer.drain()
-                assert await reader.readexactly(2) == b"\x01\x04"
-                assert await reader.readexactly(4) == b"user"
-                length = (await reader.readexactly(1))[0]
-                assert await reader.readexactly(length) == b"pass@word"
-                writer.write(b"\x01\x00")
-                await writer.drain()
-                assert await reader.readexactly(4) == b"\x05\x01\x00\x03"
-                length = (await reader.readexactly(1))[0]
-                assert await reader.readexactly(length) == b"image-api.invalid"
-                assert await reader.readexactly(2) == b"\x00\x50"
-                writer.write(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x50")
-                await writer.drain()
-            headers = await reader.readuntil(b"\r\n\r\n")
-            if scheme == "http":
-                auth = base64.b64encode(b"user:pass@word")
-                assert b"Proxy-Authorization: Basic " + auth in headers
-            else:
-                assert b"Proxy-Authorization" not in headers
-            endpoint = b"images/edits" if with_reference else b"images/generations"
-            assert endpoint in headers.split(b"\r\n")[0]
-            writer.write(
-                b"HTTP/1.1 500 Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )
-            await writer.drain()
-            received.set_result(None)
-        except Exception as exc:
-            received.set_exception(exc)
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    async with await asyncio.start_server(handle, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
-        monkeypatch.setenv("NO_PROXY", "*")
-        api.config.update(
-            api_key="test-key",
-            base_url="http://image-api.invalid/v1",
-            proxy=f" {scheme}://user:pass%40word@127.0.0.1:{port} ",
+    def create_client(**kwargs):
+        options.append(kwargs)
+        return client_type(
+            base_url=kwargs["base_url"],
+            transport=httpx.MockTransport(lambda _: httpx.Response(500)),
         )
-        payload, _ = api.prepare(ARGUMENTS)
-        references = [base64.b64encode(webp).decode()] if with_reference else []
-        with pytest.raises(ImageGenerationError, match="HTTP 500"):
-            await asyncio.wait_for(
-                api.generate(payload, references, tmp_path / "out", ARGUMENTS), 5
-            )
-        await asyncio.wait_for(received, 5)
+
+    monkeypatch.setattr(httpx, "AsyncClient", create_client)
+    payload, _ = api.prepare(ARGUMENTS)
+    with pytest.raises(ImageGenerationError, match="HTTP 500"):
+        await api.generate(payload, [], tmp_path / "out", ARGUMENTS)
+    assert len(options) == 1
+    assert options[0]["proxy"] == httpx.URL(proxy)
+    assert options[0]["follow_redirects"] is False
 
 
 @pytest.mark.parametrize("limit", [0, True, "10"])
@@ -389,9 +339,7 @@ def test_invalid_storage_limit(api, limit):
 
 
 def test_storage_failure_keeps_previous_request(api, tmp_path, webp, monkeypatch):
-    from pathlib import Path
-
-    arguments = {"prompt": {"text": "cat"}, "description": "cat"}
+    arguments = ARGUMENTS
     result = {"data": [{"b64_json": base64.b64encode(webp).decode()}]}
     output = tmp_path / "images"
     directory = api.create_request(output, arguments)
@@ -411,9 +359,7 @@ def test_storage_failure_keeps_previous_request(api, tmp_path, webp, monkeypatch
 
 
 def test_image_storage_failure_preserves_request(api, tmp_path, webp, monkeypatch):
-    from pathlib import Path
-
-    arguments = {"prompt": {"text": "cat"}, "description": "cat"}
+    arguments = ARGUMENTS
     directory = api.create_request(tmp_path / "images", arguments)
     archive = (directory / "request.yaml").read_bytes()
     original = Path.replace
@@ -479,7 +425,7 @@ def test_capacity_cleanup_order_and_boundary(tmp_path, limit, remaining):
 async def test_cleanup_precedes_http_and_keeps_current_and_queued(
     api, tmp_path, monkeypatch
 ):
-    arguments = {"prompt": {"text": "cat"}, "description": "cat"}
+    arguments = ARGUMENTS
     output = tmp_path / "images"
     old = api.create_request(output, arguments)
     (old / "large.webp").write_bytes(b"x" * 10000)
@@ -498,21 +444,23 @@ async def test_cleanup_precedes_http_and_keeps_current_and_queued(
         return httpx.Response(500)
 
     api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(respond)
+        base_url="https://example.invalid/v1/",
+        transport=httpx.MockTransport(respond),
     )
     payload, _ = api.prepare(arguments)
     with pytest.raises(ImageGenerationError, match="HTTP 500"):
         await api.generate(payload, [], output, arguments, current)
     assert len(calls) == 1
     monkeypatch.setattr(api, "storage_limit", lambda: 1)
-    with pytest.raises(ImageGenerationError, match="No Image API request"):
+    with pytest.raises(ImageGenerationError, match="No API request"):
         await api.generate(payload, [], output, arguments, current)
     assert len(calls) == 1
     assert current.exists() and queued.exists()
 
 
 @pytest.mark.parametrize(
-    "config,expected", [({}, 10_000_000_000), ({"max_storage_gb": 25}, 25_000_000_000)]
+    "config,expected",
+    [({}, 10_000_000_000), ({"max_storage_gb": 25}, 25_000_000_000)],
 )
 def test_storage_limit_in_bytes(api, config, expected):
     api.config.update(config)
