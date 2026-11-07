@@ -58,6 +58,15 @@
           ],
           "description": "Optional Responses API LLM override. Choose astra, sol, terra or luna. Omitted or null uses the configured default."
         },
+        "previous_response_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "description": "Responses API only: response_id from a successful earlier request archive to continue editing its images. Use the response ID, not an image call ID or local request number. Omitted or null starts an independent request."
+        },
         "model": {
           "type": [
             "string",
@@ -139,6 +148,12 @@
       "minLength": 1,
       "description": "Original message sender ID obtained automatically from AstrBot event.get_sender_id(), never supplied by the model. Absent in older archives or direct API calls without an event."
     },
+    "response_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S+$",
+      "description": "Responses API response ID returned after successful image generation. Pass it as request.previous_response_id on a later request to continue this image conversation. Absent in older archives and when the provider does not return a usable ID."
+    },
     "api": {
       "type": "string",
       "enum": [
@@ -177,11 +192,21 @@
         }
       },
       "else": {
+        "not": {
+          "required": [
+            "response_id"
+          ]
+        },
         "properties": {
           "request": {
             "required": [
               "description"
-            ]
+            ],
+            "not": {
+              "required": [
+                "previous_response_id"
+              ]
+            }
           }
         }
       }

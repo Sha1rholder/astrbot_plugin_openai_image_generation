@@ -40,6 +40,9 @@ def test_registered_tools_have_plugin_ownership(service):
     assert ("description" in properties) == (service.api.api_name == "image")
     assert "api" not in properties
     assert ("llm" in properties) == (service.api.api_name == "responses")
+    assert ("previous_response_id" in properties) == (
+        service.api.api_name == "responses"
+    )
     toolset = ToolSet(list(tools))
     assert len(toolset.openai_schema()) == 2
     assert len(toolset.anthropic_schema()) == 2
@@ -83,6 +86,86 @@ async def test_agent_cannot_select_api(service, event):
     assert "Invalid image arguments" in result
     assert not service._tasks
     assert not service.output_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_responses_continuation_from_archive_after_backend_restart(
+    service, event, webp
+):
+    """Continue an archived response through the tool without implicit chaining."""
+    import jsonschema
+
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        assert body["store"] is True
+        assert body["instructions"].startswith(
+            "Briefly describe the image after generate successfully."
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": f"resp_{len(requests)}",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "image_generation_call",
+                        "id": "ig_not_a_response_id",
+                        "result": base64.b64encode(webp).decode(),
+                    }
+                ],
+            },
+        )
+
+    context = ContextWrapper(
+        context=AstrAgentContext(context=service.context, event=event)
+    )
+    tool = service.context.add_llm_tools.call_args.args[1]
+    previous_id = None
+    arguments = ARGUMENTS
+    for index in range(3):
+        if index == 0:
+            service.api.client = httpx.AsyncClient(
+                base_url="https://example.invalid/v1/",
+                transport=httpx.MockTransport(respond),
+            )
+        elif index == 1:
+            await service.api.close()
+            service.api = plugin_module.ResponsesAPI(
+                service.api.config, service.api.plugin_dir
+            )
+            service.api.client = httpx.AsyncClient(
+                base_url="https://example.invalid/v1/",
+                transport=httpx.MockTransport(respond),
+            )
+            arguments = {
+                "prompt": {"text": "Keep the cat; make the background blue"},
+                "previous_response_id": previous_id,
+            }
+        else:
+            arguments = {
+                "prompt": {"text": "Draw an unrelated landscape"},
+                "previous_response_id": None,
+            }
+        queued = await tool.call(context, **arguments)
+        archive_path = service.output_dir / str(index) / "request.yaml"
+        assert str(archive_path.resolve()) in queued
+        await service.mark_agent_finished(event)
+        await service.release_image_results(event)
+        await asyncio.gather(*service._tasks)
+        archive = yaml.safe_load(archive_path.read_text())
+        jsonschema.validate(archive, api_module.REQUEST_SCHEMA)
+        assert archive["request"] == arguments
+        assert archive["user_id"] == event.get_sender_id()
+        assert archive["response_id"] == f"resp_{index + 1}"
+        assert (archive_path.parent / "0.webp").read_bytes() == webp
+        previous_id = archive["response_id"]
+    assert "previous_response_id" not in requests[0]
+    assert requests[1]["previous_response_id"] == "resp_1"
+    assert "previous_response_id" not in requests[2]
+    assert service.context.send_message.await_count == 3
 
 
 @pytest.mark.parametrize(
@@ -621,12 +704,16 @@ async def test_sender_id_is_escaped_only_in_log_filename(service, event):
 @pytest.mark.parametrize("plugin", [{"auto_optimize_prompt": False}, {}], indirect=True)
 @pytest.mark.parametrize("platform", ["webchat", "qq_official"])
 @pytest.mark.parametrize("outcome", ["success", "api_error", "unexpected_error"])
-async def test_ready_results_wait_for_final_reply(plugin, service, event, platform, outcome):
+async def test_ready_results_wait_for_final_reply(
+    plugin, service, event, platform, outcome
+):
     """Neither intermediate messages nor agent completion alone permit delivery."""
     event.get_platform_name.return_value = platform
     service.api.generate = AsyncMock(return_value=[])
     if outcome == "api_error":
-        service.api.generate.side_effect = plugin_module.ImageGenerationError("HTTP 400")
+        service.api.generate.side_effect = plugin_module.ImageGenerationError(
+            "HTTP 400"
+        )
     elif outcome == "unexpected_error":
         service.api.generate.side_effect = RuntimeError("private details")
     ready = asyncio.Event()
@@ -641,7 +728,10 @@ async def test_ready_results_wait_for_final_reply(plugin, service, event, platfo
     service._generate = prepare
     assert "queued in the background" in await service.generate(
         event,
-        {**ARGUMENTS, **({"description": "A cat"} if service.api.api_name == "image" else {})},
+        {
+            **ARGUMENTS,
+            **({"description": "A cat"} if service.api.api_name == "image" else {}),
+        },
     )
     await asyncio.wait_for(ready.wait(), 1)
     await plugin.release_image_results(event)  # An intermediate tool reply.
@@ -682,7 +772,10 @@ async def test_pipeline_completion_releases_without_final_message(
         await plugin.add_image_hint(event, ProviderRequest())
         assert "queued in the background" in await service.generate(
             event,
-            {**ARGUMENTS, **({"description": "A cat"} if service.api.api_name == "image" else {})},
+            {
+                **ARGUMENTS,
+                **({"description": "A cat"} if service.api.api_name == "image" else {}),
+            },
         )
         queued.set()
         await finish.wait()
@@ -705,7 +798,10 @@ async def test_unload_cancels_result_waiting_for_reply(plugin, service, event):
     service.api.generate = AsyncMock(return_value=[])
     assert "queued in the background" in await service.generate(
         event,
-        {**ARGUMENTS, **({"description": "A cat"} if service.api.api_name == "image" else {})},
+        {
+            **ARGUMENTS,
+            **({"description": "A cat"} if service.api.api_name == "image" else {}),
+        },
     )
     await asyncio.sleep(0)
     await asyncio.wait_for(plugin.terminate(), 1)

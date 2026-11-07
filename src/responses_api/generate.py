@@ -4,12 +4,20 @@
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from ..image_api.generate import REQUEST_SCHEMA, ImageAPI, ImageGenerationError
+import yaml
+
+from ..image_api.generate import (
+    REQUEST_SCHEMA,
+    STORAGE_LOCK,
+    ImageAPI,
+    ImageGenerationError,
+)
 
 RESPONSES_MODELS = {
     "astra": "gpt-6-astra",
@@ -55,9 +63,11 @@ class ResponsesAPI(ImageAPI):
             "tools": [{"type": "image_generation", **image_options}],
             "tool_choice": {"type": "image_generation"},
             "max_tool_calls": count,
-            "store": False,
+            "store": True,
             "stream": False,
         }
+        if arguments.get("previous_response_id") is not None:
+            payload["previous_response_id"] = arguments["previous_response_id"]
         if count > 1:
             payload["instructions"] += (
                 f"\n\nGenerate {count} separate images for the user's prompt. "
@@ -76,6 +86,47 @@ class ResponsesAPI(ImageAPI):
             content.extend({"type": "input_image", **image} for image in images)
             body["input"] = [{"role": "user", "content": content}]
         return "responses", body
+
+    @classmethod
+    def save_images(
+        cls, result: object, request_dir: Path, requested: int
+    ) -> list[Path]:
+        """Save validated images and persist their response ID for later edits.
+
+        Args:
+            result: The decoded Responses API response.
+            request_dir: Existing directory containing the original request.
+            requested: Maximum permitted image count.
+
+        Returns:
+            Saved image paths. Providers without a usable ID still deliver images.
+
+        Raises:
+            ImageGenerationError: If image validation fails.
+            OSError: If image or archive writes fail.
+        """
+        paths = super().save_images(result, request_dir, requested)
+        response_id = result.get("id") if isinstance(result, dict) else None
+        if (
+            isinstance(response_id, str)
+            and response_id
+            and not any(character.isspace() for character in response_id)
+        ):
+            with STORAGE_LOCK:
+                archive_path = request_dir / "request.yaml"
+                archive = yaml.safe_load(archive_path.read_text(encoding="utf-8"))
+                archive["response_id"] = response_id
+                with tempfile.TemporaryDirectory(
+                    prefix=".response-", dir=request_dir
+                ) as temporary:
+                    staging = Path(temporary) / "request.yaml"
+                    staging.write_text(
+                        f"# yaml-language-server: $schema={REQUEST_SCHEMA['$id']}\n"
+                        + yaml.safe_dump(archive, allow_unicode=True, sort_keys=False),
+                        encoding="utf-8",
+                    )
+                    staging.replace(archive_path)
+        return paths
 
     @staticmethod
     def response_description(result: object, arguments: dict[str, Any]) -> str:
@@ -133,7 +184,6 @@ def _inline_tests():
 
     import httpx
     import pytest
-    import yaml
     from PIL import Image
 
     ARGUMENTS = {"prompt": {"text": "cat"}}
@@ -149,6 +199,11 @@ def _inline_tests():
             {"moderation": "auto"},
             {"output_format": "png"},
             {"output_compression": 80},
+            {"previous_response_id": ""},
+            {"previous_response_id": "   "},
+            {"previous_response_id": "resp previous"},
+            {"previous_response_id": 123},
+            {"previous_response_id": ["resp_previous"]},
         ],
     )
     def test_responses_rejects_unsupported_arguments(responses_api, options):
@@ -195,11 +250,12 @@ def _inline_tests():
                 "tool_choice": {"type": "image_generation"},
                 "max_tool_calls": 1,
                 "stream": False,
-                "store": False,
+                "store": True,
             }
             return httpx.Response(
                 200,
                 json={
+                    "id": "resp_created",
                     "status": "completed",
                     "output": [
                         {"type": "reasoning"},
@@ -220,10 +276,12 @@ def _inline_tests():
         payload, _ = responses_api.prepare(arguments)
         paths = await responses_api.generate(payload, [], tmp_path, arguments)
         assert [path.read_bytes() for path in paths] == [webp]
-        assert (
-            yaml.safe_load((tmp_path / "0" / "request.yaml").read_text())["request"]
-            == arguments
-        )
+        import jsonschema
+
+        archive = yaml.safe_load((tmp_path / "0" / "request.yaml").read_text())
+        jsonschema.validate(archive, REQUEST_SCHEMA)
+        assert archive["request"] == arguments
+        assert archive["response_id"] == "resp_created"
 
     @pytest.mark.asyncio
     async def test_responses_references_and_image_options(
@@ -240,11 +298,14 @@ def _inline_tests():
             "complexity": "low",
             "size": "1536x1024",
             "background_transparency": "transparent",
+            "previous_response_id": "resp_previous",
         }
 
         def respond(request):
             assert request.url.path == "/v1/responses"
             body = json.loads(request.content)
+            assert body["previous_response_id"] == "resp_previous"
+            assert body["store"] is True
             assert body["input"] == [
                 {
                     "role": "user",
@@ -285,6 +346,72 @@ def _inline_tests():
             payload, [refs[i - 1] for i in indices], tmp_path, arguments
         )
         assert paths[0].read_bytes() == webp
+        archive = yaml.safe_load((paths[0].parent / "request.yaml").read_text())
+        assert archive["request"]["previous_response_id"] == "resp_previous"
+        assert "response_id" not in archive
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [400, 404])
+    async def test_unavailable_previous_response_is_not_retried(
+        responses_api, tmp_path, status
+    ):
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(status, json={"error": {"message": "Not found"}})
+
+        responses_api.client = httpx.AsyncClient(
+            base_url="https://example.invalid/v1/",
+            transport=httpx.MockTransport(respond),
+        )
+        arguments = {**ARGUMENTS, "previous_response_id": "resp_expired"}
+        payload, _ = responses_api.prepare(arguments)
+        with pytest.raises(
+            ImageGenerationError,
+            match="previous response may have expired.*Do not automatically retry",
+        ):
+            await responses_api.generate(payload, [], tmp_path, arguments)
+        assert len(requests) == 1
+        assert requests[0]["previous_response_id"] == "resp_expired"
+        archive = yaml.safe_load((tmp_path / "0" / "request.yaml").read_text())
+        assert archive["request"] == arguments
+        assert "response_id" not in archive
+        assert not list(tmp_path.glob("*/*.webp"))
+
+    def test_response_id_archive_write_is_atomic(
+        responses_api, tmp_path, webp, monkeypatch
+    ):
+        directory = responses_api.create_request(tmp_path / "out", ARGUMENTS)
+        archive_path = directory / "request.yaml"
+        original = archive_path.read_bytes()
+        replace = Path.replace
+
+        def fail_archive_publish(path, target):
+            if path.name == "request.yaml":
+                raise OSError("Archive update failed")
+            return replace(path, target)
+
+        monkeypatch.setattr(Path, "replace", fail_archive_publish)
+        with pytest.raises(OSError, match="Archive update failed"):
+            responses_api.save_images(
+                {
+                    "id": "resp_created",
+                    "output": [
+                        {
+                            "type": "image_generation_call",
+                            "result": base64.b64encode(webp).decode(),
+                        }
+                    ],
+                },
+                directory,
+                1,
+            )
+        assert archive_path.read_bytes() == original
+        assert {path.name for path in directory.iterdir()} == {
+            "request.yaml",
+            "0.webp",
+        }
 
     @pytest.mark.parametrize(
         "result",
@@ -298,9 +425,11 @@ def _inline_tests():
     )
     def test_responses_failures_preserve_request(responses_api, tmp_path, result):
         directory = responses_api.create_request(tmp_path / "out", ARGUMENTS)
+        original = (directory / "request.yaml").read_bytes()
         with pytest.raises(ImageGenerationError):
-            responses_api.save_images(result, directory, 1)
+            responses_api.save_images({"id": "resp_failed", **result}, directory, 1)
         assert {path.name for path in directory.iterdir()} == {"request.yaml"}
+        assert (directory / "request.yaml").read_bytes() == original
 
     def test_response_description_collects_only_assistant_text(responses_api):
         result = {

@@ -52,6 +52,7 @@ REQUEST_SCHEMA: dict[str, Any] = json.loads(
 )
 INPUT_SCHEMA: dict[str, Any] = deepcopy(REQUEST_SCHEMA["properties"]["request"])
 INPUT_SCHEMA["properties"].pop("llm")
+INPUT_SCHEMA["properties"].pop("previous_response_id")
 INPUT_SCHEMA["required"].append("description")
 
 
@@ -331,6 +332,11 @@ class ImageAPI:
                 404: "The model or endpoint is unavailable. Check base_url and account access.",
                 429: "Rate limit or quota exceeded. Check the account limits and balance.",
             }.get(response.status_code, "The image service returned an error.")
+            if body.get("previous_response_id") and response.status_code in (400, 404):
+                explanation += (
+                    " The previous response may have expired or may be unavailable on this endpoint/account. "
+                    "If it is unavailable, ask the user to resend or quote the image for a new request."
+                )
             raise ImageGenerationError(
                 f"Image generation failed (HTTP {response.status_code}): {explanation} Do not automatically retry."
             )
@@ -732,7 +738,8 @@ class ImageService:
             "do not wait or call the tool again for this request. The description and images will be sent "
             "automatically to this conversation when ready and after your reply finishes. "
             "If generation fails, a failure notification will also wait until your reply finishes. "
-            "The images have not been generated or delivered yet."
+            "The images have not been generated or delivered yet. "
+            f"Request archive: {request_dir.resolve() / 'request.yaml'}"
         )
 
     def _record_request(
@@ -1071,6 +1078,7 @@ def _inline_tests():
             {"stream": True},
             {"api": "chat"},
             {"llm": "gpt-6-astra"},
+            {"previous_response_id": "resp_previous"},
             {"reasoning": {"effort": "high"}},
             {"reasoning_effort": "high"},
             {"moderation": "auto"},
