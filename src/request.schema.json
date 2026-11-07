@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/Sha1rholder/astrbot_plugin_openai_image_generation/main/request.schema.json",
+  "$id": "https://raw.githubusercontent.com/Sha1rholder/astrbot_plugin_openai_image_generation/main/src/request.schema.json",
   "title": "Archived image generation tool request",
   "description": "Format of request.yaml saved by astrbot_plugin_openai_image_generation. Each numbered request directory is created when the tool accepts the request, with zero-based WebP image files added after successful generation. Interpret the request using the recorded plugin version; this schema describes the current tool contract.",
   "type": "object",
@@ -40,9 +40,23 @@
         },
         "description": {
           "type": "string",
-          "description": "Short description of the expected images. Automatically sent along with the generated images to user.",
+          "description": "Image API only: short description sent with the generated images. Responses API uses the returned assistant text instead.",
           "minLength": 1,
           "maxLength": 1000
+        },
+        "llm": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "astra",
+            "sol",
+            "terra",
+            "luna",
+            null
+          ],
+          "description": "Optional Responses API LLM override. Choose astra, sol, terra or luna. Omitted or null uses the configured default."
         },
         "model": {
           "type": [
@@ -54,7 +68,7 @@
             "flare",
             null
           ],
-          "description": "Model alias. Omitted or null selects sunburst; the plugin maps the alias to gpt-image-2.6-{alias}."
+          "description": "Image model alias for either API. Omitted or null selects sunburst; the plugin maps the alias to gpt-image-2.6-{alias}."
         },
         "size": {
           "type": [
@@ -115,21 +129,62 @@
         }
       },
       "required": [
-        "prompt",
-        "description"
+        "prompt"
       ],
       "additionalProperties": false,
-      "description": "The original JSON arguments supplied by the LLM to openai_image_api_generation_webp, before defaults, prompt trimming, model name expansion or Image API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
+      "description": "The original JSON arguments supplied by the LLM to openai_image_generate_webp, before defaults, prompt trimming, model name expansion or API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
     },
     "user_id": {
       "type": "string",
       "minLength": 1,
       "description": "Original message sender ID obtained automatically from AstrBot event.get_sender_id(), never supplied by the model. Absent in older archives or direct API calls without an event."
+    },
+    "api": {
+      "type": "string",
+      "enum": [
+        "image",
+        "responses"
+      ],
+      "description": "API selected by the user configuration. Absent in older archives, which used the Image API."
     }
   },
   "required": [
     "plugin_version",
     "request"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "api": {
+            "const": "responses"
+          }
+        },
+        "required": [
+          "api"
+        ]
+      },
+      "then": {
+        "properties": {
+          "request": {
+            "not": {
+              "required": [
+                "description"
+              ]
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "request": {
+            "required": [
+              "description"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

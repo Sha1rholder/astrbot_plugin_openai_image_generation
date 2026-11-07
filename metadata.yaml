@@ -1,11 +1,11 @@
 name: astrbot_plugin_openai_image_generation
 display_name: OpenAI Image Generation
-short_desc: Let your agent generate WebP via OpenAI Image API.
+short_desc: Generate WebP with the OpenAI Responses API or Image API.
 desc: |
-  A super-easy-to-use AstrBot plugin that provides your agent with latest image generation capabilities through OpenAI Image API. It has minimal system prompts, persistent storage of image generation records, and reasonable defaults that agent can override in each session. Supports gpt-image-2.6-sunburst and gpt-image-2.6-flare.
+  Generate images from text and reference images. Users can enable automatic prompt optimization through the Responses API or use the Image API directly. Supports gpt-image-2.6.
 
   Requires an OPENAI_API_KEY.
-version: v0.1.0
+version: v0.2.0
 author: Sha1rholder
 repo: https://github.com/Sha1rholder/astrbot_plugin_openai_image_generation
 astrbot_version: ">=4.29.4"

@@ -1,8 +1,8 @@
 {
 	"metadata": {
-		"display_name": "OpenAI Image API生图",
-		"short_desc": "让agent通过OpenAI Image API生成WebP",
-		"desc": "一个极简、易用的，为agent提供的OpenAI Image API图像生成工具。系统提示词极简，图像生成记录持久保存，并提供合理且可由agent调整的默认参数。支持gpt-image-2.6-sunburst和gpt-image-2.6-flare"
+		"display_name": "OpenAI图像生成",
+		"short_desc": "生成WebP，可开启提示词自动优化",
+		"desc": "支持文生图和参考图生图。用户可选择开启提示词自动优化，通过Responses API调用图像模型，关闭后使用Image API。两种接口都支持gpt-image-2.6-sunburst和gpt-image-2.6-flare"
 	},
 	"config": {
 		"api_key": {
@@ -10,16 +10,28 @@
 			"hint": "在此填写API密钥，留空时读取环境变量OPENAI_API_KEY"
 		},
 		"base_url": {
-			"description": "图像API基础地址",
-			"hint": "地址应包含`/v1`，不要包含`/images/generations`。使用参考图像时，服务需支持向`/images/edits`发送JSON请求"
+			"description": "OpenAI API基础地址",
+			"hint": "填写包含`/v1`的API根地址。默认使用`/responses`。选择Image API时，文生图使用`/images/generations`，参考图使用支持JSON的`/images/edits`"
+		},
+		"proxy": {
+			"description": "OpenAI API代理",
+			"hint": "可选HTTP(S)、SOCKS5或SOCKS5h代理地址，例如http://127.0.0.1:7890或socks5h://user:password@127.0.0.1:1080。填写后覆盖环境变量代理，留空保留环境变量代理行为。两种SOCKS协议均由代理端解析目标域名。用于生图和编辑API请求，修改后请重载插件"
+		},
+		"responses_api": {
+			"description": "自动优化提示词（会消耗更多tokens）",
+			"hint": "是否使用Responses API代替Image API生成图像。修改后请重载插件"
+		},
+		"responses_api_default_llm": {
+			"description": "提示词优化默认LLM",
+			"hint": "启用Responses API时生效，agent可在请求中覆盖此设置。修改后请重载插件"
 		},
 		"timeout_seconds": {
 			"description": "API请求超时时间（秒）",
-			"hint": "后台图像API请求的超时时间。工具会立即返回，无需增加AstrBot的工具超时时间。请求失败后不会自动重试"
+			"hint": "每次后台API请求的超时时间。工具会立即返回，请求失败后不会自动重试"
 		},
 		"max_storage_gb": {
-			"description": "最大储存占用（GB）",
-			"hint": "每次调用生图接口前统计图片归档目录的全部文件容量，超限时从最早的请求文件夹开始删除，直到低于上限。保留当前及排队中的请求；新生成的图片可能暂时超限，下次请求前再清理"
+			"description": "图像归档最大储存占用（GB）",
+			"hint": "每次调用API前统计图像归档的全部文件容量，超限时从最早的请求文件夹开始删除，直到低于上限。保留当前及排队中的请求；新生成的图片可能暂时超限，下次请求前再清理"
 		},
 		"user_window_minutes": {
 			"description": "每个用户的滑动窗口时长（分钟）",
@@ -36,10 +48,6 @@
 		"total_max_images": {
 			"description": "全局滑动窗口内所有用户的最大图像数量",
 			"hint": "非负整数。统计所有已接受请求的图像数量，包括管理员的请求。仅限制普通用户。全局窗口启用时，设为0将拒绝普通用户的请求。使用最近的1000条全局记录"
-		},
-		"proxy": {
-			"description": "图像API代理",
-			"hint": "可选HTTP(S)、SOCKS5或SOCKS5h代理地址，例如http://127.0.0.1:7890或socks5h://user:password@127.0.0.1:1080。填写后覆盖环境变量代理，留空保留环境变量代理行为。两种SOCKS协议均由代理端解析目标域名。用于生图和编辑API请求，修改后请重载插件"
 		}
 	}
 }

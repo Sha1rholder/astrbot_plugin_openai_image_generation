@@ -1,6 +1,8 @@
-# OpenAI Image API生图
+# OpenAI图像生成
 
-一个易用、极简的AstrBot插件，通过OpenAI Image API为agent提供OpenAI最新图像生成能力。系统提示词极简，图像生成记录持久保存，并提供合理且可由agent调整的默认参数。支持文生图和参考图生图
+AstrBot插件，支持文生图和参考图生图。用户通过“是否自动优化提示词（会产生额外tokens消耗）”选择接口。默认开启，通过Responses API调用LLM优化提示词；关闭后使用Image API
+
+用户可配置默认LLM为`terra`（默认）、`astra`、`sol`或`luna`，agent可通过`llm`参数在单次请求中覆盖。配置修改后请重载插件。两种接口都固定使用`moderation=low`，只输出`output_compression=100`的静态WebP
 
 请在插件配置中填写API密钥，或通过环境变量OPENAI_API_KEY提供
 

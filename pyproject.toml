@@ -1,11 +1,11 @@
 [tool.pyright]
 extends = "../../../pyproject.toml"
-include = ["main.py", "image_api.py", "tests"]
+include = ["main.py", "src"]
 exclude = []
 extraPaths = ["../../.."]
-venvPath = "."
+venvPath = "../../.."
 venv = ".venv"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["src"]
 asyncio_default_fixture_loop_scope = "function"
