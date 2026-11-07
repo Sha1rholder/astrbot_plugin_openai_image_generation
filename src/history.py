@@ -102,7 +102,7 @@ class RequestHistory:
                 "used quota, remaining quota and requested image count in the user's language. "
                 "Suggest waiting for earlier requests to leave the window, or requesting "
                 "fewer images only if quota remains. Do not claim generation has started. "
-                "Do not automatically retry."
+                "A corrected request may be submitted if it fits the remaining quota."
             )
 
     def _check_total_quota(self, log_path: Path, requested: int, now: int) -> None:
@@ -130,7 +130,7 @@ class RequestHistory:
             raise ImageGenerationError(
                 "Cannot verify the total image quota: total.log is unreadable or invalid. "
                 "No image task was queued. Tell the user generation could not start because "
-                "the shared usage history needs administrator attention. Do not automatically retry."
+                "the shared usage history needs administrator attention. Restore valid history before submitting again."
             ) from None
         self._check_remaining_quota(
             "total quota for all users", used, requested, maximum, window_minutes
@@ -183,7 +183,7 @@ class RequestHistory:
                 "request.yaml is missing or invalid. Restore the history or wait for "
                 "affected requests to leave the window. No image task was queued. "
                 "Tell the user generation could not start because their usage history "
-                "could not be verified; ask them to contact an administrator. Do not automatically retry."
+                "could not be verified; ask them to contact an administrator. Restore valid history before submitting again."
             ) from None
         self._check_remaining_quota(
             "personal quota", used, requested, maximum, window_minutes

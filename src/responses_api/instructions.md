@@ -22,8 +22,6 @@ The instructions tool lists available image indices below. Indices start at 1, w
 {"prompt":{"text":"把图改为水彩画风","images":[1]}}
 ```
 
-The tool blocks until the API request body is sent or an earlier failure is known. A sent status confirms transmission only, not server acceptance or completed generation. Acknowledge the sent request once without claiming completion; do not wait or call the tool again. On failure, explain the tool error instead of claiming submission. The Responses API describes the generated images after generation. Its returned text and all images will be delivered together when ready. Only claim completion after the results have actually been delivered.
-
 ## Previous requests
 
 Search the archive directory shown below with `rg -n -i -F -g request.yaml -- 'keyword' 'ARCHIVE_DIR'`. Each numbered directory contains the original arguments in `request.yaml`. The submission acknowledgement gives the exact archive path for that request. Successful generations also contain `0.webp`, `1.webp`, etc. Verify that image files exist before sending them.
@@ -34,4 +32,4 @@ After a successful Responses API generation, `request.yaml` also contains a top-
 {"prompt":{"text":"保留主体，将背景改为雪山"},"previous_response_id":"resp_..."}
 ```
 
-The plugin sends `store: true` so the provider can retain response context. Continuation requires the same endpoint and account to have access to the stored response. If an ID has expired or is unavailable, report the failure and ask the user to resend or quote the image for a new request. Do not automatically retry or silently drop `previous_response_id`.
+The plugin sends `store: true` so the provider can retain response context. Continuation requires the same endpoint and account to have access to the stored response.

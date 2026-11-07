@@ -70,7 +70,8 @@ async def test_real_http_submission_returns_before_response_headers(
         await asyncio.wait_for(received.wait(), 2)
         result = await asyncio.wait_for(asyncio.shield(call), 2)
         assert SENT in result
-        assert "does not confirm server acceptance" in result
+        assert "Waiting for generation" in result
+        assert "will be sent automatically when ready" in result
         assert not (service.output_dir / "0" / "0.webp").exists()
         assert len(service._tasks) == 1
         service.context.send_message.assert_not_awaited()
@@ -82,7 +83,8 @@ async def test_real_http_submission_returns_before_response_headers(
             assert (service.output_dir / "0" / "0.webp").read_bytes() == webp
         else:
             message = service.context.send_message.call_args.args[1]
-            assert "HTTP 401" in message
+            assert "HTTP 401" in service.context.llm_generate.call_args.kwargs["prompt"]
+            assert "Do not automatically retry" not in message
             assert "private" not in message
         assert not service._pending_requests
     finally:
@@ -204,7 +206,11 @@ async def test_body_started_does_not_release_tool_but_completed_does(
         service.context.send_message.assert_not_awaited()
         finish_response.set()
         await finish_turn()
-        assert "timed out" in service.context.send_message.call_args.args[1]
+        assert "timed out" in service.context.llm_generate.call_args.kwargs["prompt"]
+        assert (
+            "Do not automatically retry"
+            not in service.context.send_message.call_args.args[1]
+        )
     finally:
         finish_upload.set()
         finish_response.set()
@@ -238,3 +244,34 @@ async def test_cancelling_tool_before_submission_cancels_pending_upload(service,
     assert not service._tasks
     assert not service._pending_requests
     service.context.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explanation", ["error", "empty"])
+async def test_failure_explanation_fallback_never_sends_internal_instructions(
+    service, event, finish_turn, explanation
+):
+    from unittest.mock import AsyncMock
+
+    from data.plugins.astrbot_plugin_openai_image_generation.src.generate import (
+        ImageGenerationError,
+    )
+
+    async def fail(*args, on_request_sent, **kwargs):
+        on_request_sent()
+        raise ImageGenerationError(
+            "status=failed; error=service_unavailable. Do not automatically retry."
+        )
+
+    service.api.generate = AsyncMock(side_effect=fail)
+    if explanation == "error":
+        service.context.llm_generate.side_effect = RuntimeError("private")
+    else:
+        service.context.llm_generate.return_value.completion_text = ""
+    await service.generate(event, ARGUMENTS)
+    await finish_turn()
+    message = service.context.send_message.call_args.args[1]
+    assert "图片生成失败" in message
+    assert "Do not automatically retry" not in message
+    assert "private" not in message
+    service.api.generate.assert_awaited_once()

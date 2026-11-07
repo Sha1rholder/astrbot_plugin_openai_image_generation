@@ -254,3 +254,25 @@ def test_response_description_collects_only_assistant_text(responses_api):
         responses_api.response_description(result, ARGUMENTS)
         == "First image.\n\nSecond image."
     )
+
+
+def test_incomplete_image_failure_includes_provider_details(responses_api):
+    with pytest.raises(ImageGenerationError) as failure:
+        responses_api.image_results(
+            {
+                "output": [
+                    {
+                        "type": "image_generation_call",
+                        "status": "failed",
+                        "error": {
+                            "code": "service_unavailable",
+                            "message": "Image backend unavailable",
+                        },
+                    }
+                ]
+            }
+        )
+    assert '"status": "failed"' in str(failure.value)
+    assert "service_unavailable" in str(failure.value)
+    assert "Image backend unavailable" in str(failure.value)
+    assert "Do not automatically retry" in str(failure.value)

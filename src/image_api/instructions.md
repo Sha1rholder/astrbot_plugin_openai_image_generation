@@ -46,8 +46,6 @@ Maximum quality:
 
 In most cases, your prompt should be much longer with more detailed descriptions.
 
-The tool blocks until the API request body is sent or an earlier failure is known. A sent status confirms transmission only, not server acceptance or completed generation. Acknowledge the sent request once without claiming completion; do not wait or call the tool again. On failure, explain the tool error instead of claiming submission. Your description and generated images will be automatically sent together after generation completes.
-
 ## Finding previous requests
 
 Search archived requests by keywords from the user's request in one command. Descriptions are stored in `request.yaml` as `request.description`. Replace `ARCHIVE_DIR` with the image archive directory provided below:

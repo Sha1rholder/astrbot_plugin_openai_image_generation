@@ -188,7 +188,7 @@ async def test_zero_maximum_rejects_with_actionable_message(quota_service, event
     assert "0/0 images used" in result
     assert "personal quota" in result
     assert "No image task was queued" in result
-    assert "Do not automatically retry" in result
+    assert "A corrected request may be submitted" in result
     assert not service.output_dir.exists()
     assert not service.requests_dir.exists()
     service.api.generate.assert_not_awaited()

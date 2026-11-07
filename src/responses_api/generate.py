@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from collections.abc import Mapping
 from copy import deepcopy
@@ -158,7 +159,17 @@ class ResponsesAPI(BaseImageAPI):
             or result.get("status", "completed") != "completed"
         ):
             raise ImageGenerationError(
-                "The Responses API did not complete the request. Do not automatically retry."
+                "The Responses API did not complete the request. "
+                + json.dumps(
+                    {
+                        key: result.get(key)
+                        for key in ("status", "error", "incomplete_details")
+                    }
+                    if isinstance(result, dict)
+                    else {"error": "Invalid response object"},
+                    ensure_ascii=False,
+                )[:2000]
+                + " Do not automatically retry."
             )
         output = result.get("output")
         if not isinstance(output, list):
@@ -172,6 +183,18 @@ class ResponsesAPI(BaseImageAPI):
         ]
         if any(item.get("status", "completed") != "completed" for item in images):
             raise ImageGenerationError(
-                "Image generation did not complete. Do not automatically retry."
+                "Image generation did not complete. "
+                + json.dumps(
+                    [
+                        {
+                            key: item.get(key)
+                            for key in ("status", "error", "incomplete_details")
+                        }
+                        for item in images
+                        if item.get("status", "completed") != "completed"
+                    ],
+                    ensure_ascii=False,
+                )[:2000]
+                + " Do not automatically retry."
             )
         return [item.get("result") for item in images]

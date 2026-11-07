@@ -3,6 +3,7 @@
 import asyncio
 import io
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, create_autospec
 
 import pytest
@@ -69,6 +70,10 @@ async def plugin(request, tmp_path, monkeypatch):
 
     context = Mock(spec=Context)
     context.send_message = AsyncMock(return_value=True)
+    context.get_current_chat_provider_id = AsyncMock(return_value="chat-model")
+    context.llm_generate = AsyncMock(
+        return_value=SimpleNamespace(completion_text="图片生成失败，请稍后再试")
+    )
     monkeypatch.setattr(StarTools, "get_data_dir", lambda _: tmp_path)
     config = AstrBotConfig(
         config_path=str(tmp_path / "config.json"),

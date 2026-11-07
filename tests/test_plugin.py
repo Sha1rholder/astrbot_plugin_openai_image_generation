@@ -245,6 +245,9 @@ async def test_invalid_references_do_not_call_api(service, event):
     service.api.generate = AsyncMock()
     result = await service.generate(event, {"prompt": {"text": "cat", "images": [1]}})
     assert "does not exist" in result
+    assert "No API request was made" in result
+    assert "correct the arguments" in result
+    assert "Do not automatically retry" not in result
     assert not service._tasks
     service.api.generate.assert_not_awaited()
     service.context.send_message.assert_not_awaited()
@@ -546,7 +549,8 @@ async def test_tool_blocks_until_reference_loading_and_api_submission(
         release.set()
         result = await asyncio.wait_for(call, timeout=1)
         assert "request body was sent successfully" in result
-        assert "Reply to the user now" in result
+        assert "Waiting for generation" in result
+        assert "will be sent automatically when ready" in result
         await service.mark_agent_finished(event)
         await service.release_image_results(event)
         await asyncio.wait_for(asyncio.gather(*service._tasks), timeout=1)
@@ -639,6 +643,11 @@ async def test_failures_return_to_model_before_submission_or_deliver_afterwards(
         service.context.send_message.assert_awaited_once()
         origin, message = service.context.send_message.call_args.args
         assert origin == event.unified_msg_origin
+        assert "Do not automatically retry" not in message
+        service.context.llm_generate.assert_awaited_once()
+        assert expected in service.context.llm_generate.call_args.kwargs["prompt"]
+        assert "tools" not in service.context.llm_generate.call_args.kwargs
+        message = service.context.llm_generate.call_args.kwargs["prompt"]
     else:
         service.context.send_message.assert_not_awaited()
         assert "request body was sent successfully" not in result
