@@ -21,6 +21,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from weakref import WeakKeyDictionary
 
 import httpx
 import jsonschema
@@ -589,6 +590,12 @@ class ImageService:
         self._enqueue_lock = asyncio.Lock()
         self._generation_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._turn_finished: WeakKeyDictionary[AstrMessageEvent, asyncio.Event] = (
+            WeakKeyDictionary()
+        )
+        self._agent_finished: WeakKeyDictionary[AstrMessageEvent, bool] = (
+            WeakKeyDictionary()
+        )
         self._stopping = False
         context.add_llm_tools(ImageInstructionsTool(self), GenerateWebpTool(self))
 
@@ -624,10 +631,17 @@ class ImageService:
             f"\nAvailable reference image indices for this message: {available}"
         )
 
-    @staticmethod
-    def add_image_hint(req: ProviderRequest) -> None:
+    def add_image_hint(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         # Respect tool selection and persona-level tool restrictions.
         """Append the image tool hint once when both required tools are active."""
+        if event not in self._turn_finished:
+            finished = self._turn_finished.setdefault(event, asyncio.Event())
+            # The request hook runs in the pipeline task, before tool execution
+            # can move into child tasks. Completion also covers empty replies,
+            # errors and cancellation, which may never trigger after_message_sent.
+            owner = asyncio.current_task()
+            if owner is not None:
+                owner.add_done_callback(lambda _task: finished.set())
         if req.func_tool is None:
             return
         for name in (GENERATION_TOOL_NAME, INSTRUCTIONS_TOOL_NAME):
@@ -636,6 +650,17 @@ class ImageService:
                 return
         if SYSTEM_HINT not in req.system_prompt:
             req.system_prompt += "\n" + SYSTEM_HINT
+
+    async def mark_agent_finished(self, event: AstrMessageEvent) -> None:
+        """Record generation completion without releasing unsent final text."""
+        self._agent_finished[event] = True
+
+    async def release_image_results(self, event: AstrMessageEvent) -> None:
+        """Release results after the final reply, including all stream/segments."""
+        if self._agent_finished.get(event, False):
+            finished = self._turn_finished.get(event)
+            if finished is not None:
+                finished.set()
 
     async def generate(self, event: AstrMessageEvent, arguments: dict[str, Any]) -> str:
         """Enqueue a request without waiting for reference loading or generation.
@@ -689,7 +714,13 @@ class ImageService:
             selected = [(index, references[index - 1]) for index in indices]
             task = asyncio.create_task(
                 self._run_generation(
-                    event, arguments, payload, selected, origin, request_dir
+                    event,
+                    arguments,
+                    payload,
+                    selected,
+                    origin,
+                    request_dir,
+                    self._turn_finished.setdefault(event, asyncio.Event()),
                 )
             )
             self._tasks.add(task)
@@ -697,7 +728,8 @@ class ImageService:
         return (
             "Image generation queued in the background. Reply to the user now with a brief acknowledgement; "
             "do not wait or call the tool again for this request. The description and images will be sent "
-            "automatically to this conversation when ready, or a failure notification if generation fails. "
+            "automatically to this conversation when ready and after your reply finishes. "
+            "If generation fails, a failure notification will also wait until your reply finishes. "
             "The images have not been generated or delivered yet."
         )
 
@@ -874,6 +906,7 @@ class ImageService:
         references: list[tuple[int, MessageImage]],
         origin: str,
         request_dir: Path,
+        turn_finished: asyncio.Event,
     ) -> None:
         """Serialize generation and delivery to protect pending files from retention.
 
@@ -884,6 +917,7 @@ class ImageService:
             references: Selected reference indices and attachments.
             origin: Original conversation identifier for proactive delivery.
             request_dir: Numbered directory reserved before the tool acknowledgement.
+            turn_finished: Gate released only after the foreground reply finishes.
         """
         async with self._generation_lock:
             try:
@@ -898,6 +932,8 @@ class ImageService:
                     "Image generation encountered an unexpected error. Completion is unknown. "
                     "Check plugin logs. Do not automatically retry."
                 )
+            # Keep the retention lock until delivery so pending files cannot be pruned.
+            await turn_finished.wait()
             try:
                 # QQ Official requires the original event for reply credentials.
                 # Other adapters use proactive delivery after the agent turn ends.

@@ -43,6 +43,8 @@ async def test_quota_counts_images_and_rejection_does_not_record(quota_service, 
     service.api.generate.assert_not_awaited()
     # Exactly reaching the quota is permitted.
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert "3/3 images used" in await service.generate(event, ARGUMENTS)
     service.api.generate.assert_awaited_once()
@@ -56,6 +58,8 @@ async def test_default_window_boundary_and_expired_missing_yaml(quota_service, e
     (expired / "request.yaml").unlink()
     add_history(service, NOW - 360 * 60 + 1, count=2)
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert "3/3 images used" in await service.generate(event, ARGUMENTS)
 
@@ -70,6 +74,8 @@ async def test_custom_window_slides_and_configuration_is_read_each_call(
     assert "2/2 images used" in await service.generate(event, ARGUMENTS)
     monkeypatch.setattr(api_module.time, "time", lambda: NOW + 1)
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     service.api.config["user_max_images"] = 1
     assert "1/1 images used" in await service.generate(event, ARGUMENTS)
@@ -81,6 +87,8 @@ async def test_omitted_and_null_counts_each_use_one_image(quota_service, event):
     service.api.config["user_max_images"] = 2
     add_history(service, NOW, count=None)
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert "2/2 images used" in await service.generate(event, ARGUMENTS)
 
@@ -95,6 +103,8 @@ async def test_user_quota_is_shared_across_conversations_but_not_users(
     assert "limit exceeded" in await service.generate(event, ARGUMENTS)
     event.get_sender_id.return_value = "another-user"
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
 
 
@@ -126,6 +136,8 @@ async def test_concurrent_requests_reserve_quota_even_if_generation_fails(
         assert (service.requests_dir / "total.log").read_text() == f"{NOW}\tfalse\t2\n"
     finally:
         release.set()
+        await service.mark_agent_finished(event)
+        await service.release_image_results(event)
         await asyncio.gather(*service._tasks)
     # Accepted requests remain charged after a background failure.
     assert "limit exceeded" in await service.generate(event, ARGUMENTS)
@@ -141,6 +153,8 @@ async def test_quota_survives_restart(quota_service, event, scope):
         {f"{scope}_max_images": 1, f"{other_scope}_window_minutes": 0}
     )
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     restarted = plugin_module.WebpImagePlugin(service.context, dict(service.api.config))
     try:
@@ -173,6 +187,8 @@ async def test_zero_window_bypasses_quota_but_keeps_recording(quota_service, eve
     for _ in range(2):
         result = await service.generate(event, {**ARGUMENTS, "number_of_images": 5})
         assert "queued in the background" in result
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert len((service.requests_dir / "123456.log").read_text().splitlines()) == 3
     assert service.api.generate.await_count == 2
@@ -227,6 +243,8 @@ async def test_admin_bypass_uses_current_identity(quota_service, event):
         event.is_admin.return_value = admin
         result = await service.generate(event, ARGUMENTS)
         assert ("queued in the background" in result) is admin
+        await service.mark_agent_finished(event)
+        await service.release_image_results(event)
         await asyncio.gather(*service._tasks)
     assert (service.requests_dir / "total.log").read_text().splitlines() == [
         f"{NOW}\ttrue\t1",
@@ -243,12 +261,16 @@ async def test_admin_and_member_usage_together_limit_only_members(quota_service,
     assert "queued in the background" in await service.generate(
         event, {**ARGUMENTS, "number_of_images": 3}
     )
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     event.is_admin.return_value = False
     event.get_sender_id.return_value = "member"
     assert "queued in the background" in await service.generate(
         event, {**ARGUMENTS, "number_of_images": 2}
     )
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     result = await service.generate(event, ARGUMENTS)
     assert "5/5 images used" in result
@@ -256,6 +278,8 @@ async def test_admin_and_member_usage_together_limit_only_members(quota_service,
     assert len((service.requests_dir / "total.log").read_text().splitlines()) == 2
     event.is_admin.return_value = True
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert (service.requests_dir / "total.log").read_text().splitlines() == [
         f"{NOW}\ttrue\t3",
@@ -278,6 +302,8 @@ async def test_total_window_slides_including_admin_receipts(
     assert "last 1 minutes" in result
     monkeypatch.setattr(api_module.time, "time", lambda: NOW + 1)
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
 
 
@@ -300,6 +326,8 @@ async def test_zero_total_window_skips_only_total_check(quota_service, event):
         total_window_minutes=0, total_max_images=0, user_max_images=1
     )
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert "personal quota" in await service.generate(event, ARGUMENTS)
     assert len((service.requests_dir / "total.log").read_text().splitlines()) == 1
@@ -316,6 +344,8 @@ async def test_both_logs_keep_only_latest_1000_receipts(quota_service, event):
     user.write_text("\n".join(user_lines) + "\n")
     total.write_text("\n".join(total_lines) + "\n")
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert user.read_text().splitlines() == user_lines[6:] + [f"{NOW}\t0"]
     assert total.read_text().splitlines() == total_lines[6:] + [f"{NOW}\tfalse\t1"]
@@ -326,6 +356,8 @@ async def test_user_named_total_cannot_collide_with_aggregate_log(quota_service,
     service = quota_service
     event.get_sender_id.return_value = "total"
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
+    await service.mark_agent_finished(event)
+    await service.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert (service.requests_dir / "%74otal.log").read_text() == f"{NOW}\t0\n"
     assert (service.requests_dir / "total.log").read_text() == f"{NOW}\tfalse\t1\n"

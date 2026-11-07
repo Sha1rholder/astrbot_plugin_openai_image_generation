@@ -5,8 +5,10 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
-from astrbot.api.provider import ProviderRequest
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.astr_agent_context import AstrAgentContext
 
 from .src.image_api.generate import (
     PLUGIN_NAME,
@@ -41,9 +43,24 @@ class WebpImagePlugin(Star):
 
     @filter.on_llm_request()
     async def add_image_hint(
-        self, _event: AstrMessageEvent, req: ProviderRequest
+        self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
-        self.service.add_image_hint(req)
+        self.service.add_image_hint(event, req)
+
+    @filter.on_agent_done()
+    async def mark_agent_finished(
+        self,
+        event: AstrMessageEvent,
+        _context: ContextWrapper[AstrAgentContext],
+        _response: LLMResponse,
+    ) -> None:
+        """Record generation completion without releasing unsent final text."""
+        await self.service.mark_agent_finished(event)
+
+    @filter.after_message_sent()
+    async def release_image_results(self, event: AstrMessageEvent) -> None:
+        """Release results after the final reply, including all stream/segments."""
+        await self.service.release_image_results(event)
 
     async def terminate(self) -> None:
         await self.service.terminate()
