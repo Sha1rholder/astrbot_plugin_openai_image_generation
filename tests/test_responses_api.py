@@ -36,9 +36,9 @@ def test_responses_rejects_unsupported_arguments(responses_api, options):
     [
         ({}, "gpt-6.1-terra"),
         ({"llm": None}, "gpt-6.1-terra"),
-        ({"llm": "terra"}, "gpt-6.1-terra"),
         ({"llm": "astra"}, "gpt-6-astra"),
         ({"llm": "sol"}, "gpt-6.1-sol"),
+        ({"llm": "terra"}, "gpt-6.1-terra"),
         ({"llm": "luna"}, "gpt-6-luna"),
     ],
 )
