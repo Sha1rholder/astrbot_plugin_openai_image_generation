@@ -1,0 +1,378 @@
+"""Coordinate image tools, admission, background generation and delivery."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+from weakref import WeakKeyDictionary
+
+import httpx
+from astrbot.api.event import AstrMessageEvent, MessageEventResult
+from astrbot.api.message_components import Image as MessageImage
+from astrbot.api.message_components import Plain, Reply
+from astrbot.api.provider import ProviderRequest
+from astrbot.api.star import Context
+
+from . import create_tools
+from .generate import BaseImageAPI, GeneratedImages, ImageGenerationError
+from .history import RequestHistory
+
+
+class ImageService:
+    """Own image tools, request admission, quota accounting and background delivery."""
+
+    def __init__(
+        self,
+        context: Context,
+        apis: dict[str, BaseImageAPI],
+        data_dir: Path,
+        logger: logging.Logger,
+        preferred_api: str,
+        alternative_api: str | None,
+    ) -> None:
+        """Register both APIs with shared accounting and delivery state.
+
+        Args:
+            context: AstrBot context for tool registration and message delivery.
+            apis: Backends indexed by API name.
+            data_dir: Root directory for archives and quota receipts.
+            logger: Plugin logger.
+            preferred_api: Backend named first in the unconditional model hint.
+            alternative_api: Other allowed backend, or None to restrict calls.
+        """
+        self.context = context
+        self.apis = apis
+        self.preferred_api = preferred_api
+        self.alternative_api = alternative_api
+        self.instruction_tools, generation_tools = create_tools(self)
+        primary = self.api
+        guide = f"{self.instruction_tools[primary.api_name].name} to get instructions for {primary.generation_tool_name}"
+        self.system_hint = f"Use {guide}."
+        if alternative_api is not None:
+            alternative = apis[alternative_api]
+            self.system_hint = (
+                f"Prefer using {guide}; you may also use {self.instruction_tools[alternative.api_name].name} "
+                f"to get instructions for {alternative.generation_tool_name}."
+            )
+        self.logger = logger
+        self.output_dir = data_dir / "images"
+        self.requests_dir = data_dir / "requests"
+        self.history = RequestHistory(
+            primary.config, self.output_dir, self.requests_dir
+        )
+        self._enqueue_lock = asyncio.Lock()
+        self._generation_lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._turn_finished: WeakKeyDictionary[AstrMessageEvent, asyncio.Event] = (
+            WeakKeyDictionary()
+        )
+        self._agent_finished: WeakKeyDictionary[AstrMessageEvent, bool] = (
+            WeakKeyDictionary()
+        )
+        self._stopping = False
+        ordered_apis = [
+            primary,
+            *(api for name, api in apis.items() if name != preferred_api),
+        ]
+        context.add_llm_tools(
+            *(
+                tool
+                for api in ordered_apis
+                for tool in (
+                    self.instruction_tools[api.api_name],
+                    generation_tools[api.api_name],
+                )
+            )
+        )
+
+    @property
+    def api(self) -> BaseImageAPI:
+        """Return the preferred backend for help and shared configuration.
+
+        Returns:
+            The configured preferred API backend.
+        """
+        return self.apis[self.preferred_api]
+
+    @staticmethod
+    def reference_images(event: AstrMessageEvent) -> list[MessageImage]:
+        """List current-message images before images in quoted messages.
+
+        Args:
+            event: The message supplying reference images.
+
+        Returns:
+            Images in the stable order used by both tools.
+        """
+        components = event.get_messages()
+        images = [part for part in components if isinstance(part, MessageImage)]
+        for part in components:
+            if isinstance(part, Reply):
+                images.extend(
+                    item for item in part.chain or [] if isinstance(item, MessageImage)
+                )
+        return images
+
+    def instructions(self, event: AstrMessageEvent, api_name: str | None = None) -> str:
+        """Check mode and credentials before returning the guide and references.
+
+        Args:
+            event: Message whose attachments provide reference images.
+            api_name: Requested backend, or the configured preference for help.
+
+        Returns:
+            The selected guide, a configuration error, or allowed-tool guidance.
+        """
+        api = self.apis[api_name or self.preferred_api]
+        if api.api_name not in (self.preferred_api, self.alternative_api):
+            return (
+                f"{api.api_name.title()} API is disabled by the configured API mode. "
+                f"Use {self.instruction_tools[self.preferred_api].name} to get instructions for "
+                f"{self.api.generation_tool_name} instead."
+            )
+        return self.instruction_tools[api.api_name].instructions(event)
+
+    def add_image_hint(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        """Unconditionally append the configured API hint once per request."""
+        if event not in self._turn_finished:
+            finished = self._turn_finished.setdefault(event, asyncio.Event())
+            # The request hook runs in the pipeline task, before tool execution
+            # can move into child tasks. Completion also covers empty replies,
+            # errors and cancellation, which may never trigger after_message_sent.
+            owner = asyncio.current_task()
+            if owner is not None:
+                owner.add_done_callback(lambda _task: finished.set())
+        if self.system_hint not in req.system_prompt:
+            req.system_prompt += "\n" + self.system_hint
+
+    async def mark_agent_finished(self, event: AstrMessageEvent) -> None:
+        """Record generation completion without releasing unsent final text."""
+        self._agent_finished[event] = True
+
+    async def release_image_results(self, event: AstrMessageEvent) -> None:
+        """Release results after the final reply, including all stream/segments."""
+        if self._agent_finished.get(event, False):
+            finished = self._turn_finished.get(event)
+            if finished is not None:
+                finished.set()
+
+    async def generate(
+        self,
+        event: AstrMessageEvent,
+        arguments: dict[str, Any],
+        api_name: str | None = None,
+    ) -> str:
+        """Enqueue a request without waiting for reference loading or generation.
+
+        Args:
+            event: Original message and destination for the background result.
+            arguments: Model arguments to validate and snapshot before enqueueing.
+            api_name: Backend selected by the tool, or the configured preference.
+
+        Returns:
+            A queued acknowledgement or an immediate validation error.
+        """
+        api = self.apis[api_name or self.preferred_api]
+        if api.api_name not in (self.preferred_api, self.alternative_api):
+            return (
+                f"{api.api_name.title()} API is disabled by the configured API mode. "
+                f"Use {self.instruction_tools[self.preferred_api].name} to get instructions, then call "
+                f"{self.api.generation_tool_name} instead. No image task was queued."
+            )
+        if self._stopping:
+            return "The image plugin is shutting down. No image task was queued."
+        arguments = deepcopy(arguments)
+        try:
+            payload, indices = api.prepare(arguments)
+        except ImageGenerationError as exc:
+            return str(exc)
+        references = self.reference_images(event)
+        origin = event.unified_msg_origin
+        # Keep reservation order and background execution order identical so later
+        # requests cannot prune an earlier request that has not run yet.
+        async with self._enqueue_lock:
+            if self._stopping:
+                return "The image plugin is shutting down. No image task was queued."
+            try:
+                request_dir = await asyncio.to_thread(
+                    self.history.record,
+                    arguments,
+                    event.get_sender_id(),
+                    event.is_admin(),
+                    api,
+                )
+            except ImageGenerationError as exc:
+                return str(exc)
+            except OSError as exc:
+                self.logger.error(
+                    "Image request storage failed: %s", type(exc).__name__
+                )
+                return (
+                    "Could not save the image request. Check disk space and plugin data directory permissions. "
+                    "No image task was queued."
+                )
+            if self._stopping:
+                return "The image plugin is shutting down. No image task was queued."
+            try:
+                api.require_api_key()
+            except ImageGenerationError as exc:
+                return str(exc)
+            if any(index > len(references) for index in indices):
+                return f"Reference image index does not exist. Call {self.instruction_tools[api.api_name].name} for available indices."
+            selected = [(index, references[index - 1]) for index in indices]
+            task = asyncio.create_task(
+                self._run_generation(
+                    event,
+                    arguments,
+                    payload,
+                    selected,
+                    origin,
+                    request_dir,
+                    self._turn_finished.setdefault(event, asyncio.Event()),
+                    api,
+                )
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+        return (
+            "Image generation queued in the background. Reply to the user now with a brief acknowledgement; "
+            "do not wait or call the tool again for this request. The description and images will be sent "
+            "automatically to this conversation when ready and after your reply finishes. "
+            "If generation fails, a failure notification will also wait until your reply finishes. "
+            "The images have not been generated or delivered yet. "
+            f"Request archive: {request_dir.resolve() / 'request.yaml'}"
+        )
+
+    async def _run_generation(
+        self,
+        event: AstrMessageEvent,
+        arguments: dict[str, Any],
+        payload: dict[str, Any],
+        references: list[tuple[int, MessageImage]],
+        origin: str,
+        request_dir: Path,
+        turn_finished: asyncio.Event,
+        api: BaseImageAPI,
+    ) -> None:
+        """Serialize generation and delivery to protect pending files from retention.
+
+        Args:
+            event: Original event used for result builders and QQ reply credentials.
+            arguments: Snapshot of the original tool arguments.
+            payload: Validated request body for the selected API.
+            references: Selected reference indices and attachments.
+            origin: Original conversation identifier for proactive delivery.
+            request_dir: Numbered directory reserved before the tool acknowledgement.
+            turn_finished: Gate released only after the foreground reply finishes.
+            api: Backend captured when the request was accepted.
+        """
+        async with self._generation_lock:
+            try:
+                message = await self._generate(
+                    event, arguments, payload, references, request_dir, api
+                )
+            except Exception as exc:
+                self.logger.error(
+                    "Background image generation failed: %s", type(exc).__name__
+                )
+                message = event.plain_result(
+                    "Image generation encountered an unexpected error. Completion is unknown. "
+                    "Check plugin logs. Do not automatically retry."
+                )
+            # Keep the retention lock until delivery so pending files cannot be pruned.
+            await turn_finished.wait()
+            try:
+                # QQ Official requires the original event for reply credentials.
+                # Other adapters use proactive delivery after the agent turn ends.
+                if event.get_platform_name() == "qq_official":
+                    await event.send(message)
+                elif not await self.context.send_message(origin, message):
+                    raise RuntimeError("Destination platform is unavailable")
+            except Exception as exc:
+                self.logger.warning(
+                    "Background image result delivery failed: %s. Delivery status is unknown; "
+                    "no automatic retry. Generated files, if any, remain in %s",
+                    type(exc).__name__,
+                    self.output_dir,
+                )
+
+    async def _generate(
+        self,
+        event: AstrMessageEvent,
+        arguments: dict[str, Any],
+        payload: dict[str, Any],
+        references: list[tuple[int, MessageImage]],
+        request_dir: Path,
+        api: BaseImageAPI,
+    ) -> MessageEventResult:
+        """Prepare a background success or failure message without retrying generation.
+
+        Args:
+            event: Destination and source of reference images.
+            arguments: Arguments supplied by the language model.
+            payload: Validated request body for the selected API.
+            references: Selected reference indices and attachment snapshots.
+            request_dir: Existing directory containing the original request.
+            api: Backend captured when the request was accepted.
+
+        Returns:
+            A combined image message or a safe failure notification.
+        """
+        try:
+            # Resolve only explicitly selected attachments, never model-supplied paths.
+            encoded_images: list[str] = []
+            for index, reference in references:
+                try:
+                    encoded = await asyncio.wait_for(
+                        reference.convert_to_base64(), timeout=30
+                    )
+                    encoded_images.append(encoded)
+                except Exception as exc:
+                    self.logger.warning(
+                        "Reference image loading failed: %s", type(exc).__name__
+                    )
+                    return event.plain_result(
+                        f"Could not read reference image {index}. Please resend it. No API request was made."
+                    )
+            paths = await api.generate(
+                payload, encoded_images, self.output_dir, arguments, request_dir
+            )
+        except ImageGenerationError as exc:
+            return event.plain_result(str(exc))
+        except httpx.TimeoutException:
+            return event.plain_result(
+                "Image request timed out. The server may still be generating. Do not automatically retry: it may incur duplicate charges."
+            )
+        except httpx.RequestError:
+            return event.plain_result(
+                "Image service connection failed; completion is unknown. Check the network. Do not automatically retry."
+            )
+        except OSError as exc:
+            self.logger.error("Image storage failed: %s", type(exc).__name__)
+            return event.plain_result(
+                "Could not read or save image files. Check disk space and plugin data directory permissions."
+            )
+
+        return event.chain_result(
+            [
+                *(
+                    [Plain(paths.description)]
+                    if isinstance(paths, GeneratedImages) and paths.description
+                    else []
+                ),
+                *(MessageImage.fromFileSystem(str(path)) for path in paths),
+            ]
+        )
+
+    async def terminate(self) -> None:
+        """Cancel and await background jobs before closing the shared HTTP client."""
+        self._stopping = True
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        await asyncio.gather(*(api.close() for api in self.apis.values()))

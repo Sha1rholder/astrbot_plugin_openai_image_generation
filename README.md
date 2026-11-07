@@ -2,10 +2,10 @@
 
 # OpenAI Image Generator
 
-A super-easy-to-use AstrBot plugin. It provides your agent with latest image generation capabilities through OpenAI Image API. It has minimal system prompts, persistent storage of image generation records, and reasonable defaults that agent can override in each session. Supports text-to-image generation and generation using reference images.
+An AstrBot plugin for generating images from text and references through OpenAI Responses API or Image API, with minimal prompts and reasonable defaults.
 
-Requires an API key entered in the plugin settings or supplied through the OPENAI_API_KEY environment variable.
+Requires an `OPENAI_API_KEY` in the plugin settings or environment variable.
 
-User settings support image generation quotas, authentication, and proxies.
+Generates lossless static WebP in the background and delivers results after the agent's reply. Keeps request and image archives, with quotas, proxies, and storage cleanup. Responses API can continue edits using archived response IDs.
 
-Agents can generate images from text or reference images and choose the model, size, quality, complexity, transparent background, and number of images per request.
+Agents can choose the model, size, quality, complexity, transparency, and image count per request.

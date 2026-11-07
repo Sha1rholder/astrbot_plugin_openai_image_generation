@@ -17,20 +17,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
 import jsonschema
 import yaml
 from PIL import Image, UnidentifiedImageError
-
-from astrbot.api import FunctionTool
-from astrbot.core.agent.run_context import ContextWrapper
-from astrbot.core.astr_agent_context import AstrAgentContext
-
-if TYPE_CHECKING:
-    from ..main import ImageService
-
 
 # The archive schema is also the source of truth for the LLM tool arguments.
 REQUEST_SCHEMA: dict[str, Any] = json.loads(
@@ -58,6 +50,8 @@ class BaseImageAPI(ABC):
 
     api_name: str
     generation_tool_name: str
+    instructions_tool_name: str
+    guide: str
     input_schema: dict[str, Any]
     tool_description: str
 
@@ -516,29 +510,3 @@ class BaseImageAPI(ABC):
         if self.client is not None:
             await self.client.aclose()
             self.client = None
-
-
-class BaseGenerateWebpTool(FunctionTool[AstrAgentContext]):
-    """Dispatch API-specific generation tools through the shared plugin service."""
-
-    api_name: str
-
-    def __init__(self, service: ImageService) -> None:
-        """Register the generation tool with its input schema and owning service.
-
-        Args:
-            service: Shared service admitting and delivering requests.
-        """
-        api = service.apis[self.api_name]
-        super().__init__(
-            name=api.generation_tool_name,
-            description=api.tool_description,
-            parameters=api.input_schema,
-        )
-        self.service = service
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs: Any
-    ) -> str:
-        """Forward model arguments and the current event to the image generation handler."""
-        return await self.service.generate(context.context.event, kwargs, self.api_name)

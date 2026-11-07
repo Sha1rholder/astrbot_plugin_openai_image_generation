@@ -1,3 +1,7 @@
+[tool.ruff]
+extend = "../../../pyproject.toml"
+exclude = [".venv", ".local"]
+
 [tool.pyright]
 extends = "../../../pyproject.toml"
 include = ["main.py", "src"]
@@ -7,5 +11,6 @@ venvPath = "../../.."
 venv = ".venv"
 
 [tool.pytest.ini_options]
-testpaths = ["src"]
+testpaths = ["tests"]
+pythonpath = ["../../.."]
 asyncio_default_fixture_loop_scope = "function"

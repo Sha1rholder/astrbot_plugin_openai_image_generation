@@ -9,12 +9,16 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 import yaml
-
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-MODES = ["Responses API only", "Prefer Responses API", "Image API only", "Prefer Image API"]
+MODES = [
+    "Responses API only",
+    "Prefer Responses API",
+    "Image API only",
+    "Prefer Image API",
+]
 
 
 @pytest.mark.asyncio
