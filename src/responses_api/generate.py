@@ -1,5 +1,7 @@
 """Optimize prompts and call the image generation tool through the Responses API."""
 
+# Explicit OpenAI LLM and image generation model selection is retained for future development, but intentionally not exposed to callers in the tool prompt.
+
 from __future__ import annotations
 
 from collections.abc import Mapping

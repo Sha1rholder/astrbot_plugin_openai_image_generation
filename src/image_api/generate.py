@@ -1,5 +1,7 @@
 """Generate images through the Image API and validate and archive requests."""
 
+# Explicit image generation model selection is retained for future development, but intentionally not exposed to callers in the tool prompt.
+
 from __future__ import annotations
 
 import asyncio
