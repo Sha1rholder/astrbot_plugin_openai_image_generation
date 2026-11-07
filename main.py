@@ -9,6 +9,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from weakref import WeakKeyDictionary
 
 import httpx
 import yaml
@@ -16,7 +17,7 @@ import yaml
 from astrbot.api import AstrBotConfig, FunctionTool
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.message_components import Image, Plain, Reply
-from astrbot.api.provider import ProviderRequest
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
@@ -29,9 +30,7 @@ INSTRUCTIONS_TOOL_NAME = "get_openai_image_api_generation_webp_instructions"
 SYSTEM_HINT = (
     f"Call {INSTRUCTIONS_TOOL_NAME} to generate static WebP with OpenAI Image API."
 )
-INSTRUCTIONS_TOOL_DESCRIPTION = (
-    "Check API key configuration, then read image generation instructions and available reference image indices."
-)
+INSTRUCTIONS_TOOL_DESCRIPTION = "Check API key configuration, then read image generation instructions and available reference image indices."
 GENERATION_TOOL_DESCRIPTION = "Generate static WebP with OpenAI Image API."
 GUIDE = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
 
@@ -81,6 +80,12 @@ class WebpImagePlugin(Star):
         self._enqueue_lock = asyncio.Lock()
         self._generation_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._turn_finished: WeakKeyDictionary[AstrMessageEvent, asyncio.Event] = (
+            WeakKeyDictionary()
+        )
+        self._agent_finished: WeakKeyDictionary[AstrMessageEvent, bool] = (
+            WeakKeyDictionary()
+        )
         self._stopping = False
         self.api = ImageAPI(config, Path(__file__).parent)
         self.output_dir = StarTools.get_data_dir(PLUGIN_NAME) / "images"
@@ -128,10 +133,18 @@ class WebpImagePlugin(Star):
 
     @filter.on_llm_request()
     async def add_image_hint(
-        self, _event: AstrMessageEvent, req: ProviderRequest
+        self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
         # Respect tool selection and persona-level tool restrictions.
         """Append the image tool hint once when both required tools are active."""
+        if event not in self._turn_finished:
+            finished = self._turn_finished.setdefault(event, asyncio.Event())
+            # The request hook runs in the pipeline task, before tool execution
+            # can move into child tasks. Completion also covers empty replies,
+            # errors and cancellation, which may never trigger after_message_sent.
+            owner = asyncio.current_task()
+            if owner is not None:
+                owner.add_done_callback(lambda _task: finished.set())
         if req.func_tool is None:
             return
         for name in (GENERATION_TOOL_NAME, INSTRUCTIONS_TOOL_NAME):
@@ -140,6 +153,24 @@ class WebpImagePlugin(Star):
                 return
         if SYSTEM_HINT not in req.system_prompt:
             req.system_prompt += "\n" + SYSTEM_HINT
+
+    @filter.on_agent_done()
+    async def mark_agent_finished(
+        self,
+        event: AstrMessageEvent,
+        _context: ContextWrapper[AstrAgentContext],
+        _response: LLMResponse,
+    ) -> None:
+        """Record generation completion without releasing unsent final text."""
+        self._agent_finished[event] = True
+
+    @filter.after_message_sent()
+    async def release_image_results(self, event: AstrMessageEvent) -> None:
+        """Release results after the final reply, including all stream/segments."""
+        if self._agent_finished.get(event, False):
+            finished = self._turn_finished.get(event)
+            if finished is not None:
+                finished.set()
 
     async def generate(self, event: AstrMessageEvent, arguments: dict[str, Any]) -> str:
         """Enqueue a request without waiting for reference loading or generation.
@@ -167,7 +198,10 @@ class WebpImagePlugin(Star):
                 return "The image plugin is shutting down. No image task was queued."
             try:
                 request_dir = await asyncio.to_thread(
-                    self._record_request, arguments, event.get_sender_id(), event.is_admin()
+                    self._record_request,
+                    arguments,
+                    event.get_sender_id(),
+                    event.is_admin(),
                 )
             except ImageGenerationError as exc:
                 return str(exc)
@@ -190,7 +224,13 @@ class WebpImagePlugin(Star):
             selected = [(index, references[index - 1]) for index in indices]
             task = asyncio.create_task(
                 self._run_generation(
-                    event, arguments, payload, selected, origin, request_dir
+                    event,
+                    arguments,
+                    payload,
+                    selected,
+                    origin,
+                    request_dir,
+                    self._turn_finished.setdefault(event, asyncio.Event()),
                 )
             )
             self._tasks.add(task)
@@ -198,7 +238,8 @@ class WebpImagePlugin(Star):
         return (
             "Image generation queued in the background. Reply to the user now with a brief acknowledgement; "
             "do not wait or call the tool again for this request. The description and images will be sent "
-            "automatically to this conversation when ready, or a failure notification if generation fails. "
+            "automatically to this conversation when ready and after your reply finishes. "
+            "If generation fails, a failure notification will also wait until your reply finishes. "
             "The images have not been generated or delivered yet."
         )
 
@@ -222,10 +263,14 @@ class WebpImagePlugin(Star):
         if not is_admin:
             self._check_user_quota(log_path, user_id, requested, requested_at)
             self._check_total_quota(total_path, requested, requested_at)
-        request_dir = self.api.create_request(self.output_dir, arguments, user_id=user_id)
+        request_dir = self.api.create_request(
+            self.output_dir, arguments, user_id=user_id
+        )
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self._append_log(log_path, f"{requested_at}\t{request_dir.name}")
-        self._append_log(total_path, f"{requested_at}\t{str(is_admin).lower()}\t{requested}")
+        self._append_log(
+            total_path, f"{requested_at}\t{str(is_admin).lower()}\t{requested}"
+        )
         return request_dir
 
     @staticmethod
@@ -371,6 +416,7 @@ class WebpImagePlugin(Star):
         references: list[tuple[int, Image]],
         origin: str,
         request_dir: Path,
+        turn_finished: asyncio.Event,
     ) -> None:
         """Serialize generation and delivery to protect pending files from retention.
 
@@ -381,6 +427,7 @@ class WebpImagePlugin(Star):
             references: Selected reference indices and attachments.
             origin: Original conversation identifier for proactive delivery.
             request_dir: Numbered directory reserved before the tool acknowledgement.
+            turn_finished: Gate released only after the foreground reply finishes.
         """
         async with self._generation_lock:
             try:
@@ -395,6 +442,9 @@ class WebpImagePlugin(Star):
                     "Image generation encountered an unexpected error. Completion is unknown. "
                     "Check plugin logs. Do not automatically retry."
                 )
+            # Success and every failure path share the same delivery barrier.
+            # Keep the retention lock while waiting so files cannot be pruned.
+            await turn_finished.wait()
             try:
                 # QQ Official requires the original event for reply credentials.
                 # Other adapters use proactive delivery after the agent turn ends.

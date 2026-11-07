@@ -7,6 +7,10 @@ from unittest.mock import AsyncMock, Mock, create_autospec
 import httpx
 import pytest
 import yaml
+from conftest import plugin_module
+from mcp.types import TextContent
+from PIL import Image as PILImage
+
 from astrbot.api import ToolSet
 from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.provider import ProviderRequest
@@ -14,9 +18,6 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.star.context import _resolve_tool_handler_module_path
-from conftest import plugin_module
-from mcp.types import TextContent
-from PIL import Image as PILImage
 
 ARGUMENTS = {"description": "A cat", "prompt": {"text": "cat"}}
 
@@ -122,6 +123,8 @@ async def test_only_selected_references_are_loaded(plugin, event, monkeypatch, i
         event, {**ARGUMENTS, "prompt": {"text": "cat", "images": indices}}
     )
     assert "queued in the background" in result
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await plugin.release_image_results(event)
     await asyncio.gather(*plugin._tasks)
     if indices:
         loader.assert_awaited_once_with(second)
@@ -143,6 +146,8 @@ async def test_reference_loading_failure_prevents_api_call(plugin, event, monkey
         event, {"description": "A cat", "prompt": {"text": "cat", "images": [1]}}
     )
     assert "queued in the background" in result
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await plugin.release_image_results(event)
     await asyncio.gather(*plugin._tasks)
     result = plugin.context.send_message.call_args.args[1]
     assert "No Image API request" in result
@@ -163,6 +168,8 @@ async def test_combined_delivery_failure_never_regenerates(plugin, event, tmp_pa
         {"description": "A cat", "prompt": {"text": "cat"}, "number_of_images": 2},
     )
     assert "queued in the background" in result
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await plugin.release_image_results(event)
     await asyncio.gather(*plugin._tasks)
     plugin.logger.warning.assert_called_once()
     assert "Delivery status is unknown" in plugin.logger.warning.call_args.args[0]
@@ -232,6 +239,8 @@ async def test_astrbot_executor_to_http_to_delivery(
     generation_content = generation_result.content[0]
     assert isinstance(generation_content, TextContent)
     assert "queued in the background" in generation_content.text
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await plugin.release_image_results(event)
     await asyncio.gather(*plugin._tasks)
     assert len(requests) == 1
     assert json.loads(requests[0].content)["n"] == requested
@@ -274,6 +283,8 @@ async def test_retention_waits_for_delivery(plugin, event, monkeypatch):
     arguments = {"prompt": {"text": "cat"}, "description": "cat"}
     await plugin.generate(event, arguments)
     try:
+        await plugin.mark_agent_finished(event, Mock(), Mock())
+        await plugin.release_image_results(event)
         await asyncio.wait_for(entered.wait(), timeout=5)
         archive_size = (plugin.output_dir / "0" / "request.yaml").stat().st_size
         monkeypatch.setattr(plugin.api, "storage_limit", lambda: archive_size + 1)
@@ -284,6 +295,8 @@ async def test_retention_waits_for_delivery(plugin, event, monkeypatch):
         assert (plugin.output_dir / "1" / "request.yaml").is_file()
         assert not (plugin.output_dir / "1" / "0.webp").exists()
         release.set()
+        await plugin.mark_agent_finished(event, Mock(), Mock())
+        await plugin.release_image_results(event)
         await asyncio.gather(*plugin._tasks)
         assert not (plugin.output_dir / "0").exists()
         assert (plugin.output_dir / "1" / "0.webp").is_file()
@@ -347,6 +360,8 @@ async def test_tool_returns_before_background_work_finishes(
         event.get_messages.return_value = []
         arguments["prompt"]["text"] = "changed"
         release.set()
+        await plugin.mark_agent_finished(event, Mock(), Mock())
+        await plugin.release_image_results(event)
         await asyncio.wait_for(asyncio.gather(*plugin._tasks), timeout=1)
         assert not plugin._tasks
         assert plugin.api.generate.call_args.args[0]["prompt"] == "cat"
@@ -408,6 +423,8 @@ async def test_background_failures_notify_original_conversation(
     """Background errors reach the user without leaking exception details or retrying."""
     plugin.api.generate = AsyncMock(side_effect=error)
     await plugin.generate(event, ARGUMENTS)
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await plugin.release_image_results(event)
     await asyncio.gather(*plugin._tasks)
     plugin.api.generate.assert_awaited_once()
     plugin.context.send_message.assert_awaited_once()
@@ -425,6 +442,8 @@ async def test_qq_official_uses_original_reply_event(plugin, event, tmp_path):
     event.get_platform_name.return_value = "qq_official"
     plugin.api.generate = AsyncMock(return_value=[tmp_path / "image.webp"])
     await plugin.generate(event, ARGUMENTS)
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await plugin.release_image_results(event)
     await asyncio.gather(*plugin._tasks)
     event.send.assert_awaited_once()
     plugin.context.send_message.assert_not_awaited()
@@ -465,6 +484,8 @@ async def test_request_history_uses_event_identity_and_survives_failure(
     plugin.api.generate = AsyncMock(side_effect=httpx.ConnectError("offline"))
     result = await plugin.generate(event, ARGUMENTS)
     assert "queued in the background" in result
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await plugin.release_image_results(event)
     await asyncio.gather(*plugin._tasks)
     archive = yaml.safe_load((plugin.output_dir / "0" / "request.yaml").read_text())
     assert archive["user_id"] == event.get_sender_id.return_value
@@ -482,6 +503,8 @@ async def test_sender_id_is_escaped_only_in_log_filename(plugin, event):
     event.get_sender_id.return_value = user_id
     plugin.api.generate = AsyncMock(return_value=[])
     await plugin.generate(event, {"description": "cat", "prompt": {"text": "cat"}})
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await plugin.release_image_results(event)
     await asyncio.gather(*plugin._tasks)
     assert {p.name for p in plugin.requests_dir.iterdir()} == {
         quote(user_id, safe="") + ".log",
@@ -489,3 +512,87 @@ async def test_sender_id_is_escaped_only_in_log_filename(plugin, event):
     }
     archive = yaml.safe_load((plugin.output_dir / "0" / "request.yaml").read_text())
     assert archive["user_id"] == user_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["webchat", "qq_official"])
+@pytest.mark.parametrize("outcome", ["success", "api_error", "unexpected_error"])
+async def test_ready_results_wait_for_final_reply(plugin, event, platform, outcome):
+    """Neither intermediate messages nor agent completion alone permit delivery."""
+    event.get_platform_name.return_value = platform
+    plugin.api.generate = AsyncMock(return_value=[])
+    if outcome == "api_error":
+        plugin.api.generate.side_effect = plugin_module.ImageGenerationError("HTTP 400")
+    elif outcome == "unexpected_error":
+        plugin.api.generate.side_effect = RuntimeError("private details")
+    ready = asyncio.Event()
+    original = plugin._generate
+
+    async def prepare(*args):
+        try:
+            return await original(*args)
+        finally:
+            ready.set()
+
+    plugin._generate = prepare
+    await plugin.generate(event, ARGUMENTS)
+    await asyncio.wait_for(ready.wait(), 1)
+    await plugin.release_image_results(event)  # An intermediate tool reply.
+    await asyncio.sleep(0)
+    plugin.context.send_message.assert_not_awaited()
+    event.send.assert_not_awaited()
+    await plugin.mark_agent_finished(event, Mock(), Mock())
+    await asyncio.sleep(0)
+    plugin.context.send_message.assert_not_awaited()
+    event.send.assert_not_awaited()
+    # Another event in the same conversation must not release this turn.
+    other = create_autospec(plugin_module.AstrMessageEvent, instance=True)
+    other.unified_msg_origin = event.unified_msg_origin
+    await plugin.mark_agent_finished(other, Mock(), Mock())
+    await plugin.release_image_results(other)
+    await asyncio.sleep(0)
+    plugin.context.send_message.assert_not_awaited()
+    event.send.assert_not_awaited()
+    await plugin.release_image_results(event)
+    await asyncio.wait_for(asyncio.gather(*plugin._tasks), 1)
+    sender = event.send if platform == "qq_official" else plugin.context.send_message
+    sender.assert_awaited_once()
+    plugin.api.generate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_pipeline_completion_releases_without_final_message(
+    plugin, event, cancelled
+):
+    """Empty or interrupted turns can finish without a message-sent hook."""
+    queued = asyncio.Event()
+    finish = asyncio.Event()
+    plugin.api.generate = AsyncMock(return_value=[])
+
+    async def pipeline():
+        await plugin.add_image_hint(event, ProviderRequest())
+        await plugin.generate(event, ARGUMENTS)
+        queued.set()
+        await finish.wait()
+
+    owner = asyncio.create_task(pipeline())
+    await asyncio.wait_for(queued.wait(), 1)
+    plugin.context.send_message.assert_not_awaited()
+    if cancelled:
+        owner.cancel()
+    else:
+        finish.set()
+    await asyncio.gather(owner, return_exceptions=True)
+    await asyncio.wait_for(asyncio.gather(*plugin._tasks), 1)
+    plugin.context.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unload_cancels_result_waiting_for_reply(plugin, event):
+    plugin.api.generate = AsyncMock(return_value=[])
+    await plugin.generate(event, ARGUMENTS)
+    await asyncio.sleep(0)
+    await asyncio.wait_for(plugin.terminate(), 1)
+    assert not plugin._tasks
+    plugin.context.send_message.assert_not_awaited()
