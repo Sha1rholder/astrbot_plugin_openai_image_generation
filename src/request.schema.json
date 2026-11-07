@@ -93,6 +93,7 @@
             "null"
           ],
           "enum": [
+            "auto",
             "low",
             "medium",
             "high",
@@ -121,6 +122,7 @@
             "null"
           ],
           "enum": [
+            "auto",
             "transparent",
             "opaque",
             null

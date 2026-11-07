@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from conftest import api_module, plugin_module
+from conftest import plugin_module
 
 NOW = 1_800_000_000
 ARGUMENTS = {"prompt": {"text": "cat"}}
@@ -13,7 +13,7 @@ ARGUMENTS = {"prompt": {"text": "cat"}}
 
 @pytest.fixture
 def quota_service(service, monkeypatch):
-    monkeypatch.setattr(api_module.time, "time", lambda: NOW)
+    monkeypatch.setattr(plugin_module.time, "time", lambda: NOW)
     service.api.generate = AsyncMock(return_value=[])
     return service
 
@@ -72,7 +72,7 @@ async def test_custom_window_slides_and_configuration_is_read_each_call(
     service.api.config.update(user_window_minutes=2, user_max_images=2)
     add_history(service, NOW - 119, count=2)
     assert "2/2 images used" in await service.generate(event, ARGUMENTS)
-    monkeypatch.setattr(api_module.time, "time", lambda: NOW + 1)
+    monkeypatch.setattr(plugin_module.time, "time", lambda: NOW + 1)
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
     await service.mark_agent_finished(event)
     await service.release_image_results(event)
@@ -300,7 +300,7 @@ async def test_total_window_slides_including_admin_receipts(
     result = await service.generate(event, ARGUMENTS)
     assert "5/5 images used" in result
     assert "last 1 minutes" in result
-    monkeypatch.setattr(api_module.time, "time", lambda: NOW + 1)
+    monkeypatch.setattr(plugin_module.time, "time", lambda: NOW + 1)
     assert "queued in the background" in await service.generate(event, ARGUMENTS)
     await service.mark_agent_finished(event)
     await service.release_image_results(event)

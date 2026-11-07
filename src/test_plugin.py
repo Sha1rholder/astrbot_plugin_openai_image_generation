@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, create_autospec
 import httpx
 import pytest
 import yaml
-from conftest import api_module, plugin_module
+from conftest import api_module, plugin_module, responses_module
 from mcp.types import TextContent
 from PIL import Image as PILImage
 
@@ -72,13 +72,11 @@ def test_configured_llm_and_agent_override(service, event, override):
     default = service.api.config.get(
         "responses_api_default_llm", service.api.config.get("responses_default_llm")
     )
-    expected = plugin_module.ResponsesAPI
+    expected = responses_module.ResponsesAPI
     assert isinstance(service.api, expected)
     assert service.api.input_schema["properties"]["llm"]["default"] == default
     assert f"Configured default LLM: {default}" in service.instructions(event)
     payload, _ = service.api.prepare({**ARGUMENTS, "llm": override})
-    from conftest import responses_module
-
     assert payload["model"] == responses_module.RESPONSES_MODELS[override or default]
     assert "reasoning" not in payload
 
@@ -141,7 +139,7 @@ async def test_responses_continuation_from_archive_after_backend_restart(
             )
         elif index == 1:
             await service.api.close()
-            service.apis["responses"] = plugin_module.ResponsesAPI(
+            service.apis["responses"] = responses_module.ResponsesAPI(
                 service.api.config, service.api.plugin_dir
             )
             service.api.client = httpx.AsyncClient(
@@ -228,7 +226,7 @@ def test_reference_order_and_instructions(service, event):
 async def test_help_command_uses_selected_backend_guide(plugin, service, event):
     messages = [message async for message in plugin.image_help(event)]
     assert messages == [service.instructions(event)]
-    assert service.api.guide in messages[0]
+    assert service.instruction_tools[service.preferred_api].guide in messages[0]
 
 
 def test_instructions_report_missing_key(service, event):
@@ -236,13 +234,13 @@ def test_instructions_report_missing_key(service, event):
     result = service.instructions(event)
     assert "no usable OPENAI_API_KEY" in result
     assert "Do not call the generation tool" in result
-    assert service.api.guide not in result
+    assert service.instruction_tools[service.preferred_api].guide not in result
 
 
 @pytest.mark.asyncio
 async def test_generation_rechecks_key_before_enqueueing(service, event):
     """A key removed after reading instructions must prevent a queued acknowledgement."""
-    assert service.api.guide in service.instructions(event)
+    assert service.instruction_tools[service.preferred_api].guide in service.instructions(event)
     service.api.config["api_key"] = ""
     service.api.generate = AsyncMock()
     result = await service.generate(event, ARGUMENTS)
@@ -402,7 +400,7 @@ async def test_astrbot_executor_to_http_to_delivery(
     assert instruction_result is not None
     instruction_content = instruction_result.content[0]
     assert isinstance(instruction_content, TextContent)
-    assert service.api.guide in instruction_content.text
+    assert service.instruction_tools[service.preferred_api].guide in instruction_content.text
     result = [
         item
         async for item in FunctionToolExecutor._execute_local(
@@ -648,6 +646,35 @@ async def test_qq_official_uses_original_reply_event(service, event, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plugin", [{"api_mode": "Image API only"}, {}], indirect=True
+)
+@pytest.mark.parametrize(
+    "field", ["complexity", "quality", "model", "background_transparency"]
+)
+async def test_invalid_enum_arguments_do_not_enqueue(plugin, service, event, field):
+    """Reject unknown enum values in both registered generation tools before side effects."""
+    service.api.generate = AsyncMock()
+    arguments = {**ARGUMENTS, field: "super_high"}
+    if service.api.api_name == "image":
+        arguments["description"] = "A cat"
+    context = ContextWrapper(
+        context=AstrAgentContext(context=service.context, event=event)
+    )
+    tool = service.context.add_llm_tools.call_args.args[1]
+    result = await tool.call(context, **arguments)
+    assert result == (
+        f"Invalid image arguments: {field} violates the enum constraint. "
+        "Read the usage instructions."
+    )
+    assert not service._tasks
+    service.api.generate.assert_not_awaited()
+    service.context.send_message.assert_not_awaited()
+    assert not service.output_dir.exists()
+    assert not service.requests_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_invalid_arguments_do_not_enqueue(service, event):
     """Invalid arguments are returned synchronously so the agent can correct them."""
     result = await service.generate(event, {"prompt": {"text": ""}})
@@ -676,7 +703,7 @@ async def test_archive_failure_does_not_enqueue(service, event, monkeypatch):
 async def test_request_history_uses_event_identity_and_survives_failure(
     service, event, monkeypatch
 ):
-    monkeypatch.setattr(api_module.time, "time", lambda: 1_800_000_000)
+    monkeypatch.setattr(plugin_module.time, "time", lambda: 1_800_000_000)
     service.api.generate = AsyncMock(side_effect=httpx.ConnectError("offline"))
     result = await service.generate(event, ARGUMENTS)
     assert "queued in the background" in result

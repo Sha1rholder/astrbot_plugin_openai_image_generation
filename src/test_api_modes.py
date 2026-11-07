@@ -53,7 +53,7 @@ async def test_modes_hint_guides_and_restricted_calls(plugin, service, event):
                 assert instructions in result
                 assert generation in result
             else:
-                assert service.apis[tool.api_name].guide in result
+                assert service.instruction_tools[tool.api_name].guide in result
                 assert f"`openai_image_generate_webp_{tool.api_name}_api`" in result
         elif mode.endswith(" only") and tool.api_name == secondary:
             # Restriction must win over argument validation and missing credentials.

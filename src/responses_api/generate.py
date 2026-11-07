@@ -12,14 +12,15 @@ from typing import Any
 
 import yaml
 
-from ..image_api.generate import (
-    GENERATION_TOOL_NAME,
-    INSTRUCTIONS_TOOL_NAME,
+from ..generate import (
     REQUEST_SCHEMA,
     STORAGE_LOCK,
-    ImageAPI,
+    BaseGenerateWebpTool,
+    BaseImageAPI,
     ImageGenerationError,
 )
+
+GENERATION_TOOL_NAME = "openai_image_generate_webp_responses_api"
 
 RESPONSES_MODELS = {
     "astra": "gpt-6-astra",
@@ -29,15 +30,13 @@ RESPONSES_MODELS = {
 }
 
 
-class ResponsesAPI(ImageAPI):
+class ResponsesAPI(BaseImageAPI):
     """Optimize prompts with an LLM and generate images through the Responses API."""
 
     api_name = "responses"
-    instructions_tool_name = INSTRUCTIONS_TOOL_NAME + "_responses_api"
-    generation_tool_name = GENERATION_TOOL_NAME + "_responses_api"
+    generation_tool_name = GENERATION_TOOL_NAME
     input_schema = deepcopy(REQUEST_SCHEMA["properties"]["request"])
     input_schema["properties"].pop("description")
-    guide = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
     tool_description = "Generate static WebP with automatic prompt optimization using OpenAI Responses API."
 
     def __init__(self, config: Mapping[str, Any], plugin_dir: Path) -> None:
@@ -52,14 +51,12 @@ class ResponsesAPI(ImageAPI):
         self.default_llm = default_llm
         self.input_schema = deepcopy(self.input_schema)
         self.input_schema["properties"]["llm"]["default"] = default_llm
-        self.guide += f"\n\nConfigured default LLM: {default_llm} ({RESPONSES_MODELS[default_llm]})."
 
     def prepare(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
         """Reuse image validation and place rendering options on the hosted tool."""
-        image_options, indices = super().prepare(arguments)
-        prompt = image_options.pop("prompt")
-        count = image_options.pop("n")
-        image_options.pop("stream")
+        image_options, indices = self.prepare_image_options(arguments)
+        prompt = arguments["prompt"]["text"].strip()
+        count = int(arguments.get("number_of_images") or 1)
         payload = {
             "model": RESPONSES_MODELS[arguments.get("llm") or self.default_llm],
             "input": prompt,
@@ -178,6 +175,12 @@ class ResponsesAPI(ImageAPI):
                 "Image generation did not complete. Do not automatically retry."
             )
         return [item.get("result") for item in images]
+
+
+class GenerateWebpTool(BaseGenerateWebpTool):
+    """Expose Responses API generation through the shared plugin service."""
+
+    api_name = "responses"
 
 
 def _inline_tests():
