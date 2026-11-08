@@ -5,7 +5,7 @@ desc: |
   Generate images from text and reference images. Users can enable automatic prompt optimization through the Responses API or use the Image API directly. Supports gpt-image-2.6.
 
   Requires an OPENAI_API_KEY.
-version: v0.2.0
+version: v0.2.1
 author: Sha1rholder
 repo: https://github.com/Sha1rholder/astrbot_plugin_openai_image_generation
 astrbot_version: ">=4.29.4"

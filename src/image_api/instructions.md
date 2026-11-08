@@ -10,7 +10,7 @@ Use `openai_image_generate_webp_image_api` to generate and deliver lossless stat
 - (Optional) `quality`: `low`, `medium`, `high`, `xhigh`, `max`. Defaults to `auto`.
 - (Optional) `complexity`: `low`, `medium`, `high`. Control how much the image model plans before rendering. Lower complexity can suit focused edits, such as changing a background or a sign. Higher complexity can help with dense text, complex layouts, and relationships between objects. Higher complexity can increase latency and introduce unwanted changes, so compare results for your task. Defaults to `high`.
 - (Optional) `background_transparency`: `opaque` or `transparent`. Defaults to `auto`.
-- (Optional) `number_of_images`: Integer from 1 to 5. Defaults to 1; set manually only when generating multiple images at once.
+- (Optional) `number_of_images`: Number of separate output images, from 1 to 5. Defaults to 1. Set this parameter for multiple images; do not specify the output count in `prompt.text`.
 
 In most cases you should omit optional arguments as all have reasonable defaults.
 
