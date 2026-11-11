@@ -1,82 +1,88 @@
 {
-	"api_key": {
-		"description": "OPENAI_API_KEY",
-		"type": "string",
-		"secret": true,
-		"default": "",
-		"hint": "Enter the API key here, or leave empty to read the OPENAI_API_KEY environment variable."
-	},
-	"base_url": {
-		"description": "OpenAI API base URL",
-		"type": "string",
-		"default": "https://api.openai.com/v1",
-		"hint": "Use the API root including /v1. The default route uses /responses. The Image API uses /images/generations and requires JSON support for /images/edits with reference images."
-	},
-	"proxy": {
-		"description": "OpenAI API proxy",
-		"type": "string",
-		"secret": true,
-		"default": "",
-		"hint": "Optional HTTP(S), SOCKS5 or SOCKS5h proxy URL, e.g. http://127.0.0.1:7890 or socks5h://user:password@127.0.0.1:1080. Overrides environment proxies when set; leave empty to keep environment proxy settings. Both SOCKS schemes resolve target domains at the proxy. Applies to generation and edit API requests. Reload the plugin after changes."
-	},
-	"api_mode": {
-		"description": "Image generation API mode",
-		"type": "string",
-		"options": [
-			"Responses API only",
-			"Prefer Responses API",
-			"Image API only",
-			"Prefer Image API"
-		],
-		"default": "Responses API only",
-		"hint": "Only modes restrict calls to one API. Prefer modes allow both APIs and guide the agent to prefer one. Responses API optimizes prompts using an LLM and consumes additional tokens. Reload the plugin after changes."
-	},
-	"responses_api_default_llm": {
-		"description": "Default LLM for prompt optimization",
-		"type": "string",
-		"options": [
-			"astra",
-			"sol",
-			"terra",
-			"luna"
-		],
-		"default": "terra",
-		"hint": "Used when Responses API is enabled. Agent can override this in request. Reload the plugin after changes."
-	},
-	"timeout_seconds": {
-		"description": "API request timeout in seconds",
-		"type": "int",
-		"default": 300,
-		"hint": "Timeout for each background API request. The tool returns immediately. Failed requests are not automatically retried."
-	},
-	"max_storage_gb": {
-		"description": "Maximum image archive storage (GB)",
-		"type": "int",
-		"default": 10,
-		"hint": "Before each API request, if total archive file size exceeds this limit, delete oldest request directories until below it. Current and queued requests are protected. New images may exceed the limit until the next request."
-	},
-	"user_window_minutes": {
-		"description": "Per-user sliding window (minutes)",
-		"type": "int",
-		"default": 360,
-		"hint": "Nonnegative integer. Default: 360 minutes. Set to 0 to skip the sliding-window quota check."
-	},
-	"user_max_images": {
-		"description": "Maximum images per user in the sliding window",
-		"type": "int",
-		"default": 3,
-		"hint": "Nonnegative integer. Default: 3 images. Counts requested images, including pending and failed jobs. A quota of 0 rejects requests through the normal quota check; the tool remains available. Ignored when the window is 0. Rejected requests are not recorded. Administrators bypass this check. Uses the latest 1000 receipts per user."
-	},
-	"total_window_minutes": {
-		"description": "Total sliding window (minutes)",
-		"type": "int",
-		"default": 360,
-		"hint": "Nonnegative integer. Set to 0 to skip the total quota check. Administrators bypass both quota checks but their usage still counts."
-	},
-	"total_max_images": {
-		"description": "Maximum images for all users in the total window",
-		"type": "int",
-		"default": 30,
-		"hint": "Nonnegative integer. Counts all accepted images, including administrator requests. Only ordinary users are restricted. Set to 0 to reject ordinary-user requests when the total window is enabled. Uses the latest 1000 total receipts."
-	}
+  "api_key": {
+    "description": "OPENAI_API_KEY",
+    "type": "string",
+    "secret": true,
+    "default": "",
+    "hint": "Enter the API key here, or leave empty to read the OPENAI_API_KEY environment variable."
+  },
+  "base_url": {
+    "description": "OpenAI API base URL",
+    "type": "string",
+    "default": "https://api.openai.com/v1",
+    "hint": "Use the API root including /v1. The default route uses /responses. The Image API uses /images/generations and requires JSON support for /images/edits with reference images."
+  },
+  "proxy": {
+    "description": "OpenAI API proxy",
+    "type": "string",
+    "secret": true,
+    "default": "",
+    "hint": "Optional HTTP(S), SOCKS5 or SOCKS5h proxy URL, e.g. http://127.0.0.1:7890 or socks5h://user:password@127.0.0.1:1080. Overrides environment proxies when set; leave empty to keep environment proxy settings. Both SOCKS schemes resolve target domains at the proxy. Applies to generation and edit API requests. Reload the plugin after changes."
+  },
+  "api_mode": {
+    "description": "Image generation API mode",
+    "type": "string",
+    "options": [
+      "Responses API only",
+      "Prefer Responses API",
+      "Image API only",
+      "Prefer Image API"
+    ],
+    "default": "Responses API only",
+    "hint": "Only modes restrict calls to one API. Prefer modes allow both APIs and guide the agent to prefer one. Responses API optimizes prompts using an LLM and consumes additional tokens. Reload the plugin after changes."
+  },
+  "responses_api_default_llm": {
+    "description": "Default LLM for prompt optimization",
+    "type": "string",
+    "options": [
+      "astra",
+      "sol",
+      "terra",
+      "luna"
+    ],
+    "default": "terra",
+    "hint": "Used when Responses API is enabled. Agent can override this in request. Reload the plugin after changes."
+  },
+  "timeout_seconds": {
+    "description": "API request timeout in seconds",
+    "type": "int",
+    "default": 300,
+    "hint": "Timeout for each background API request. The tool returns immediately. Failed requests are not automatically retried."
+  },
+  "max_storage_gb": {
+    "description": "Maximum image archive storage (GB)",
+    "type": "int",
+    "default": 10,
+    "hint": "Before each API request, if total archive file size exceeds this limit, delete oldest request directories until below it. Current and queued requests are protected. New images may exceed the limit until the next request."
+  },
+  "allow_non_admin_private_chat": {
+    "description": "Allow non-administrators to generate images in private chats",
+    "type": "bool",
+    "default": false,
+    "hint": "Disabled by default. When disabled, any call to this plugin's tools by a non-administrator in a private chat returns: Non-administrator users are currently only allowed to generate images in group chats. Administrator private chats and group chats continue to follow the existing rules. Reload the plugin after changes."
+  },
+  "user_window_minutes": {
+    "description": "Per-user sliding window (minutes)",
+    "type": "int",
+    "default": 360,
+    "hint": "Nonnegative integer. Default: 360 minutes. Set to 0 to skip the sliding-window quota check."
+  },
+  "user_max_images": {
+    "description": "Maximum images per user in the sliding window",
+    "type": "int",
+    "default": 3,
+    "hint": "Nonnegative integer. Default: 3 images. Counts requested images, including pending and failed jobs. A quota of 0 rejects requests through the normal quota check; the tool remains available. Ignored when the window is 0. Rejected requests are not recorded. Administrators bypass this check. Uses the latest 1000 receipts per user."
+  },
+  "total_window_minutes": {
+    "description": "Total sliding window (minutes)",
+    "type": "int",
+    "default": 360,
+    "hint": "Nonnegative integer. Set to 0 to skip the total quota check. Administrators bypass both quota checks but their usage still counts."
+  },
+  "total_max_images": {
+    "description": "Maximum images for all users in the total window",
+    "type": "int",
+    "default": 30,
+    "hint": "Nonnegative integer. Counts all accepted images, including administrator requests. Only ordinary users are restricted. Set to 0 to reject ordinary-user requests when the total window is enabled. Uses the latest 1000 total receipts."
+  }
 }

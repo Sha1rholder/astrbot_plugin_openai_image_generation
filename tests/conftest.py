@@ -106,9 +106,10 @@ def event():
     from astrbot.api.event import AstrMessageEvent
 
     message = create_autospec(AstrMessageEvent, instance=True)
-    message.unified_msg_origin = "webchat:FriendMessage:test-session"
+    message.unified_msg_origin = "webchat:GroupMessage:test-session"
     message.get_sender_id.return_value = "123456"
     message.is_admin.return_value = False
+    message.is_private_chat.return_value = False
     message.get_messages.return_value = []
     message.get_platform_name.return_value = "webchat"
     message.plain_result.side_effect = lambda text: text

@@ -21,6 +21,8 @@ from . import create_tools
 from .generate import BaseImageAPI, GeneratedImages, ImageGenerationError
 from .history import RequestHistory
 
+PRIVATE_CHAT_RESTRICTION = "目前非管理员用户仅允许在群聊中生图"
+
 
 class ImageService:
     """Own image tools, request admission, quota accounting and background delivery."""
@@ -119,15 +121,21 @@ class ImageService:
         return images
 
     def instructions(self, event: AstrMessageEvent, api_name: str | None = None) -> str:
-        """Check mode and credentials before returning the guide and references.
+        """Check access, mode and credentials before returning the guide.
 
         Args:
             event: Message whose attachments provide reference images.
             api_name: Requested backend, or the configured preference for help.
 
         Returns:
-            The selected guide, a configuration error, or allowed-tool guidance.
+            The selected guide, an access denial, or configuration guidance.
         """
+        if (
+            not self.api.config.get("allow_non_admin_private_chat", False)
+            and event.is_private_chat()
+            and not event.is_admin()
+        ):
+            return PRIVATE_CHAT_RESTRICTION
         api = self.apis[api_name or self.preferred_api]
         if api.api_name not in (self.preferred_api, self.alternative_api):
             return (
@@ -177,6 +185,12 @@ class ImageService:
         Returns:
             A transmission acknowledgement or an error before submission.
         """
+        if (
+            not self.api.config.get("allow_non_admin_private_chat", False)
+            and event.is_private_chat()
+            and not event.is_admin()
+        ):
+            return PRIVATE_CHAT_RESTRICTION
         api = self.apis[api_name or self.preferred_api]
         if api.api_name not in (self.preferred_api, self.alternative_api):
             return (

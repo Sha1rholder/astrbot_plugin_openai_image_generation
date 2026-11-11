@@ -15,7 +15,7 @@ from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
-from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
+from astrbot.core.astr_agent_runtime.tool_executor import FunctionToolExecutor
 from astrbot.core.star.context import _resolve_tool_handler_module_path
 from data.plugins.astrbot_plugin_openai_image_generation import main as plugin_module
 from data.plugins.astrbot_plugin_openai_image_generation.src import (
