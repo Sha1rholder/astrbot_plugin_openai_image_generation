@@ -1,4 +1,4 @@
-# Image generation instructions (Image API)
+# Image generation instructions for Image API
 
 Use `openai_image_generate_webp_image_api` to generate and deliver lossless static WebP with OpenAI Image API and `gpt-image-2.6-sunburst`.
 
@@ -10,7 +10,7 @@ Use `openai_image_generate_webp_image_api` to generate and deliver lossless stat
 - (Optional) `quality`: `low`, `medium`, `high`, `xhigh`, `max`. Defaults to `auto`.
 - (Optional) `complexity`: `low`, `medium`, `high`. Control how much the image model plans before rendering. Lower complexity can suit focused edits, such as changing a background or a sign. Higher complexity can help with dense text, complex layouts, and relationships between objects. Higher complexity can increase latency and introduce unwanted changes, so compare results for your task. Defaults to `high`.
 - (Optional) `background_transparency`: `opaque` or `transparent`. Defaults to `auto`.
-- (Optional) `number_of_images`: Number of separate output images, from 1 to 5. Defaults to 1. Set this parameter for multiple images; do not specify the output count in `prompt.text`.
+- (Optional) `number_of_images`: Number of separate output images, from 1 to 5. Defaults to 1. Set this parameter to generate multiple images at once. Do not specify this number in `prompt.text`.
 
 In most cases you should omit optional arguments as all have reasonable defaults.
 
@@ -35,7 +35,7 @@ Everyday creation:
 Fast bulk generation:
 
 ```json
-{"prompt":{"text":"An angry chibi anime girl with black hair in her bedroom with pink background saying \"Why are u licking my shoes!\""},"description":"Angry chibi girl emoji","model":"flare","quality":"low","complexity":"low","size":"1024x1240","number_of_images":5}
+{"prompt":{"text":"An angry chibi anime girl with black hair in her bedroom with pink background saying \"Why are u licking my shoes!\""},"description":"Angry chibi girl emoji","model":"flare","quality":"low","complexity":"low","size":"1024x1024","number_of_images":5}
 ```
 
 Maximum quality:
