@@ -21,7 +21,9 @@ from . import create_tools
 from .generate import BaseImageAPI, GeneratedImages, ImageGenerationError
 from .history import RequestHistory
 
-PRIVATE_CHAT_RESTRICTION = "目前非管理员用户仅允许在群聊中生图"
+PRIVATE_CHAT_RESTRICTION = (
+    "Non-admin users are currently only allowed to generate images in group chats."
+)
 
 
 class ImageService:
