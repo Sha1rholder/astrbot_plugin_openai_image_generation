@@ -19,18 +19,6 @@
     "default": "",
     "hint": "Optional HTTP(S), SOCKS5 or SOCKS5h proxy URL, e.g. http://127.0.0.1:7890 or socks5h://user:password@127.0.0.1:1080. Overrides environment proxies when set; leave empty to keep environment proxy settings. Both SOCKS schemes resolve target domains at the proxy. Applies to generation and edit API requests. Reload the plugin after changes."
   },
-  "api_mode": {
-    "description": "Image generation API mode",
-    "type": "string",
-    "options": [
-      "Responses API only",
-      "Prefer Responses API",
-      "Image API only",
-      "Prefer Image API"
-    ],
-    "default": "Responses API only",
-    "hint": "Only modes restrict calls to one API. Prefer modes allow both APIs and guide the agent to prefer one. Responses API optimizes prompts using an LLM and consumes additional tokens. Reload the plugin after changes."
-  },
   "responses_api_default_llm": {
     "description": "Default LLM for prompt optimization",
     "type": "string",
@@ -41,7 +29,7 @@
       "luna"
     ],
     "default": "terra",
-    "hint": "Used when Responses API is enabled. Agent can override this in request. Reload the plugin after changes."
+    "hint": "Default model for Responses API requests."
   },
   "timeout_seconds": {
     "description": "API request timeout in seconds",

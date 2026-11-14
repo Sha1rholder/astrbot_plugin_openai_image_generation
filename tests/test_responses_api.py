@@ -13,17 +13,24 @@ from data.plugins.astrbot_plugin_openai_image_generation.src.generate import (
 )
 from PIL import Image
 
-ARGUMENTS = {"prompt": {"text": "cat"}}
+ARGUMENTS = {"prompt": "cat", "description": "A cat"}
 
 
 @pytest.mark.parametrize(
     "options",
     [
-        {"description": "A cat"},
+        {"description": None},
+        {"number_of_images": 1},
+        {"number_of_images": None},
+        {"model": "sunburst"},
+        {"llm": "terra"},
         {"llm": "gpt-6-astra"},
         {"previous_response_id": ""},
         {"previous_response_id": "resp previous"},
         {"previous_response_id": 123},
+        {"web_search": "false"},
+        {"web_search": 0},
+        {"web_search": None},
     ],
 )
 def test_responses_rejects_unsupported_arguments(responses_api, options):
@@ -31,22 +38,11 @@ def test_responses_rejects_unsupported_arguments(responses_api, options):
         responses_api.prepare({**ARGUMENTS, **options})
 
 
-@pytest.mark.parametrize(
-    "choice,model",
-    [
-        ({}, "gpt-6.1-terra"),
-        ({"llm": None}, "gpt-6.1-terra"),
-        ({"llm": "astra"}, "gpt-6-astra"),
-        ({"llm": "sol"}, "gpt-6.1-sol"),
-        ({"llm": "terra"}, "gpt-6.1-terra"),
-        ({"llm": "luna"}, "gpt-6-luna"),
-    ],
-)
-def test_responses_models_and_default_options(responses_api, choice, model):
-    payload, indices = responses_api.prepare({**ARGUMENTS, **choice})
+def test_responses_default_options(responses_api):
+    payload, indices = responses_api.prepare(ARGUMENTS)
     assert indices == []
     assert payload == {
-        "model": model,
+        "model": "gpt-6.1-terra",
         "input": "cat",
         "instructions": "Briefly describe the image after generate successfully.",
         "tools": [
@@ -61,24 +57,33 @@ def test_responses_models_and_default_options(responses_api, choice, model):
                 "output_compression": 100,
                 "moderation": "low",
                 "partial_images": 0,
-            }
+            },
+            {"type": "web_search", "external_web_access": True},
         ],
-        "tool_choice": {"type": "image_generation"},
-        "max_tool_calls": 1,
+        "tool_choice": "auto",
         "stream": False,
         "store": True,
     }
 
 
 @pytest.mark.asyncio
-async def test_responses_references_and_image_options(responses_api, tmp_path, webp):
+@pytest.mark.parametrize(
+    "settings",
+    [{}, {"web_search": True}, {"web_search": False}],
+)
+@pytest.mark.parametrize("count", [1, 3])
+async def test_responses_references_and_image_options(
+    responses_api, tmp_path, webp, settings, count
+):
     png = io.BytesIO()
     Image.new("RGB", (16, 16)).save(png, "PNG")
     refs = [base64.b64encode(raw).decode() for raw in (webp, png.getvalue())]
     arguments = {
         **ARGUMENTS,
-        "prompt": {"text": " edit ", "images": [2, 1]},
-        "model": "flare",
+        **settings,
+        "prompt": f"Generate {count} edited images",
+        "reference_images": [1, 0],
+        "description": "A cat",
         "quality": "xhigh",
         "complexity": "low",
         "size": "1536x1024",
@@ -91,11 +96,23 @@ async def test_responses_references_and_image_options(responses_api, tmp_path, w
         body = json.loads(request.content)
         assert body["previous_response_id"] == "resp_previous"
         assert body["store"] is True
+        if settings.get("web_search", True):
+            assert body["tools"][1:] == [
+                {"type": "web_search", "external_web_access": True}
+            ]
+            assert body["tool_choice"] == "auto"
+            assert "max_tool_calls" not in body
+            assert "Generate" not in body["instructions"]
+        else:
+            assert len(body["tools"]) == 1
+            assert body["tool_choice"] == {"type": "image_generation"}
+            assert "max_tool_calls" not in body
+            assert "web search" not in body["instructions"]
         assert body["input"] == [
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "edit"},
+                    {"type": "input_text", "text": f"Generate {count} edited images"},
                     {
                         "type": "input_image",
                         "image_url": "data:image/png;base64," + refs[1],
@@ -108,17 +125,20 @@ async def test_responses_references_and_image_options(responses_api, tmp_path, w
             }
         ]
         tool = body["tools"][0]
-        assert tool["model"] == "gpt-image-2.6-flare"
+        assert tool["model"] == "gpt-image-2.6-sunburst"
         assert tool["quality"] == "xhigh"
         assert tool["complexity"] == "low"
         assert tool["size"] == "1536x1024"
         assert tool["background"] == "transparent"
+        output = [
+            {"type": "image_generation_call", "result": refs[0]} for _ in range(count)
+        ]
+        if settings.get("web_search", True):
+            output.insert(0, {"type": "web_search_call", "status": "completed"})
         return httpx.Response(
             200,
             json={
-                "output": [
-                    {"type": "image_generation_call", "result": refs[0]},
-                ]
+                "output": output,
             },
         )
 
@@ -128,9 +148,10 @@ async def test_responses_references_and_image_options(responses_api, tmp_path, w
     )
     payload, indices = responses_api.prepare(arguments)
     paths = await responses_api.generate(
-        payload, [refs[i - 1] for i in indices], tmp_path, arguments
+        payload, [refs[i] for i in indices], tmp_path, arguments
     )
-    assert paths[0].read_bytes() == webp
+    assert len(paths) == count
+    assert all(path.read_bytes() == webp for path in paths)
     archive = yaml.safe_load((paths[0].parent / "request.yaml").read_text())
     assert archive["request"]["previous_response_id"] == "resp_previous"
     assert "response_id" not in archive
@@ -155,7 +176,7 @@ async def test_unavailable_previous_response_is_not_retried(
     payload, _ = responses_api.prepare(arguments)
     with pytest.raises(
         ImageGenerationError,
-        match="previous response may have expired.*Do not automatically retry",
+        match="Previous response may have expired.*Ask for permission before retry",
     ):
         await responses_api.generate(payload, [], tmp_path, arguments)
     assert len(requests) == 1
@@ -220,7 +241,7 @@ def test_responses_failures_preserve_request(responses_api, tmp_path, result):
     assert (directory / "request.yaml").read_bytes() == original
 
 
-def test_response_description_collects_only_assistant_text(responses_api):
+def test_response_text_collects_only_assistant_text(responses_api):
     result = {
         "output": [
             {
@@ -251,8 +272,8 @@ def test_response_description_collects_only_assistant_text(responses_api):
         ]
     }
     assert (
-        responses_api.response_description(result, ARGUMENTS)
-        == "First image.\n\nSecond image."
+        responses_api.response_text(result)
+        == "First image.\n\nignored\n\nSecond image."
     )
 
 
@@ -275,4 +296,11 @@ def test_incomplete_image_failure_includes_provider_details(responses_api):
     assert '"status": "failed"' in str(failure.value)
     assert "service_unavailable" in str(failure.value)
     assert "Image backend unavailable" in str(failure.value)
-    assert "Do not automatically retry" in str(failure.value)
+    assert "Ask for permission before retry" in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "result", [None, [], {}, {"output": None}, {"output": "invalid"}]
+)
+def test_malformed_output_has_no_assistant_text(responses_api, result):
+    assert responses_api.response_text(result) == ""

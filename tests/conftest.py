@@ -42,7 +42,7 @@ def plugin_dir(tmp_path):
 
 @pytest_asyncio.fixture
 async def api(plugin_dir):
-    from data.plugins.astrbot_plugin_openai_image_generation.src.image_api.generate import (
+    from data.plugins.astrbot_plugin_openai_image_generation.src.image_api import (
         ImageAPI,
     )
 
@@ -53,7 +53,7 @@ async def api(plugin_dir):
 
 @pytest_asyncio.fixture
 async def responses_api(plugin_dir):
-    from data.plugins.astrbot_plugin_openai_image_generation.src.responses_api.generate import (
+    from data.plugins.astrbot_plugin_openai_image_generation.src.responses_api import (
         ResponsesAPI,
     )
 
@@ -70,6 +70,11 @@ async def plugin(request, tmp_path, monkeypatch):
 
     context = Mock(spec=Context)
     context.send_message = AsyncMock(return_value=True)
+    context.agent = SimpleNamespace(
+        run_turn=AsyncMock(
+            return_value=SimpleNamespace(result=AsyncMock(), cancel=AsyncMock())
+        )
+    )
     context.get_current_chat_provider_id = AsyncMock(return_value="chat-model")
     context.llm_generate = AsyncMock(
         return_value=SimpleNamespace(completion_text="图片生成失败，请稍后再试")

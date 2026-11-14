@@ -50,8 +50,6 @@ class BaseImageAPI(ABC):
 
     api_name: str
     generation_tool_name: str
-    instructions_tool_name: str
-    guide: str
     input_schema: dict[str, Any]
     tool_description: str
 
@@ -95,11 +93,7 @@ class BaseImageAPI(ABC):
         )
         if not api_key:
             raise ImageGenerationError(
-                "Image generation is unavailable: no usable OPENAI_API_KEY is configured. "
-                "Configure api_key in the plugin settings, or provide the OPENAI_API_KEY environment variable. "
-                "Tell the user that image generation cannot start until an API key is configured. "
-                "Do not call the generation tool or claim that a request was submitted or queued. "
-                "No API request was made by this call."
+                "Image generation unavailable: no usable OPENAI_API_KEY is configured."
             )
         return api_key
 
@@ -132,7 +126,7 @@ class BaseImageAPI(ABC):
             ) from None
         if "description" in arguments and not arguments["description"].strip():
             raise ImageGenerationError("The image description must not be blank.")
-        prompt = arguments["prompt"]["text"].strip()
+        prompt = arguments["prompt"].strip()
         if not prompt:
             raise ImageGenerationError("The image prompt must not be blank.")
         size = arguments.get("size")
@@ -156,7 +150,7 @@ class BaseImageAPI(ABC):
                 )
             api_size = f"{width}x{height}"
         image_options = {
-            "model": "gpt-image-2.6-" + (arguments.get("model") or "sunburst"),
+            "model": "gpt-image-2.6-sunburst",
             "size": api_size,
             "quality": arguments.get("quality") or "auto",
             "complexity": arguments.get("complexity") or "high",
@@ -167,7 +161,7 @@ class BaseImageAPI(ABC):
             "partial_images": 0,
         }
         return image_options, [
-            int(index) for index in arguments["prompt"].get("images", [])
+            int(index) for index in arguments.get("reference_images", [])
         ]
 
     def storage_limit(self) -> int:
@@ -247,6 +241,7 @@ class BaseImageAPI(ABC):
         request_dir: Path | None = None,
         *,
         on_request_sent: Callable[[], None] | None = None,
+        on_response_text: Callable[[str], None] | None = None,
         retention_floor: int | None = None,
     ) -> list[Path]:
         """Call the selected API once and save outputs in the reserved request directory.
@@ -262,6 +257,8 @@ class BaseImageAPI(ABC):
             request_dir: Previously reserved archive, if any.
             on_request_sent: Called only after the API request body is sent. This
                 confirms transmission, not server acceptance or image generation.
+            on_response_text: Receives assistant text for internal agent feedback,
+                including text-only responses that do not contain valid images.
             retention_floor: Oldest request still awaiting generation or delivery.
 
         Returns:
@@ -349,16 +346,15 @@ class BaseImageAPI(ABC):
                 400: "The service rejected the parameters or content. Check model access, prompt and arguments.",
                 401: "Invalid API key. Check the plugin configuration.",
                 403: "Model access is denied or organization verification is required.",
-                404: "The model or endpoint is unavailable. Check base_url and account access.",
-                429: "Rate limit or quota exceeded. Check the account limits and balance.",
-            }.get(response.status_code, "The image service returned an error.")
+                404: "Model or endpoint is unavailable. Check base_url and account access.",
+                429: "Rate limit or quota exceeded. Check account limits and balance.",
+            }.get(response.status_code, "Image service returned an error.")
             if body.get("previous_response_id") and response.status_code in (400, 404):
                 explanation += (
-                    " The previous response may have expired or may be unavailable on this endpoint/account. "
-                    "If it is unavailable, ask the user to resend or quote the image for a new request."
+                    " Previous response may have expired or unavailable on this endpoint/account."
                 )
             raise ImageGenerationError(
-                f"Image generation failed (HTTP {response.status_code}): {explanation} Do not automatically retry."
+                f"Image generation failed (HTTP {response.status_code}): {explanation} Ask for permission before retry."
             )
         # Custom transports may not emit HTTPcore traces. A successful response
         # also proves submission, but never acknowledge merely entering post().
@@ -368,8 +364,11 @@ class BaseImageAPI(ABC):
             result = response.json()
         except ValueError:
             raise ImageGenerationError(
-                "The image service returned invalid JSON. Do not automatically retry."
+                "Image service returned invalid JSON. Ask for permission before retry."
             ) from None
+        text = self.response_text(result)
+        if text and on_response_text is not None:
+            on_response_text(text)
         paths = await asyncio.to_thread(
             self.save_images,
             result,
@@ -377,13 +376,19 @@ class BaseImageAPI(ABC):
             int(arguments.get("number_of_images") or 1),
         )
 
-        return GeneratedImages(paths, self.response_description(result, arguments))
+        return GeneratedImages(paths, arguments["description"])
 
     @staticmethod
-    @abstractmethod
-    def response_description(result: object, arguments: dict[str, Any]) -> str:
-        """Extract the caption associated with this backend's response."""
-        raise NotImplementedError
+    def response_text(result: object) -> str:
+        """Return optional assistant text for internal feedback.
+
+        Args:
+            result: Decoded backend response.
+
+        Returns:
+            Empty text for backends without an assistant response.
+        """
+        return ""
 
     @staticmethod
     @abstractmethod
@@ -442,14 +447,14 @@ class BaseImageAPI(ABC):
         cls,
         result: object,
         request_dir: Path,
-        requested: int,
+        requested: int | None,
     ) -> list[Path]:
         """Validate all images, then save the API bytes without recompression.
 
         Args:
             result: The decoded API response.
             request_dir: Existing numbered directory containing request.yaml.
-            requested: Maximum permitted response count.
+            requested: Maximum permitted response count, or None for prompt-driven output.
 
         Returns:
             Paths of the generated WebP files.
@@ -459,9 +464,9 @@ class BaseImageAPI(ABC):
             OSError: If files cannot be written.
         """
         data = cls.image_results(result)
-        if not 1 <= len(data) <= requested:
+        if not data or (requested is not None and len(data) > requested):
             raise ImageGenerationError(
-                "The image service returned no valid image list. Do not automatically retry."
+                "Image service returned no valid image list. Do not automatically retry."
             )
         decoded: list[bytes] = []
         for encoded in data:
@@ -482,7 +487,7 @@ class BaseImageAPI(ABC):
                 Image.DecompressionBombError,
             ):
                 raise ImageGenerationError(
-                    "The image service did not return valid WebP images. Do not automatically retry."
+                    "Image service didn't return valid WebP images. Ask for permission before retry."
                 ) from None
         # Stage all image writes while preserving the already published request.
         with STORAGE_LOCK:

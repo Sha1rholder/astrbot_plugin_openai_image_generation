@@ -10,11 +10,12 @@ from astrbot.api import AstrBotConfig
 from data.plugins.astrbot_plugin_openai_image_generation import main as plugin_module
 
 NOW = 1_800_000_000
-ARGUMENTS = {"prompt": {"text": "cat"}}
+ARGUMENTS = {"prompt": "cat", "description": "A cat"}
 
 
 @pytest.fixture
 def quota_service(service, monkeypatch):
+    service.preferred_api = "image"
     monkeypatch.setattr(time, "time", lambda: NOW)
     service.api.generate = AsyncMock(return_value=[])
     return service
@@ -173,6 +174,7 @@ async def test_quota_survives_restart(
         default_config=dict(service.api.config),
     )
     restarted = plugin_module.WebpImagePlugin(service.context, config)
+    restarted.service.preferred_api = "image"
     try:
         assert "1/1 images used" in await restarted.service.generate(event, ARGUMENTS)
         assert not restarted.service._tasks

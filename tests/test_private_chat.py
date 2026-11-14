@@ -8,30 +8,20 @@ import pytest
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-MODES = [
-    "Responses API only",
-    "Prefer Responses API",
-    "Image API only",
-    "Prefer Image API",
-]
 NOTICE = "Non-admin users are currently only allowed to generate images in group chats."
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "plugin",
-    [
-        {"api_mode": mode, **setting}
-        for mode in MODES
-        for setting in ({}, {"allow_non_admin_private_chat": False})
-    ],
+    [{}, {"allow_non_admin_private_chat": False}],
     indirect=True,
 )
 @pytest.mark.parametrize("invalid_request", [False, True])
 async def test_private_chat_denies_every_tool_before_other_checks(
     plugin, service, event, invalid_request
 ):
-    """Deny access before mode, credentials, validation, references or quota."""
+    """Deny access before credentials, validation, references or quota."""
     event.is_private_chat.return_value = True
     event.unified_msg_origin = "webchat:FriendMessage:test-session"
     if invalid_request:
@@ -48,7 +38,7 @@ async def test_private_chat_denies_every_tool_before_other_checks(
             arguments = (
                 {"unsupported_argument": True}
                 if invalid_request
-                else {"prompt": {"text": "cat"}}
+                else {"prompt": "cat", "description": "A cat"}
             )
             if not invalid_request and tool.api_name == "image":
                 arguments["description"] = "cat"
@@ -66,9 +56,6 @@ async def test_private_chat_denies_every_tool_before_other_checks(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "plugin", [{"api_mode": mode} for mode in MODES], indirect=True
-)
-@pytest.mark.parametrize(
     "allow_private,is_private,is_admin",
     [(True, True, False), (False, True, True), (False, False, False)],
     ids=["enabled-private", "admin-private", "non-admin-group"],
@@ -76,7 +63,7 @@ async def test_private_chat_denies_every_tool_before_other_checks(
 async def test_allowed_chats_keep_existing_tool_behavior(
     service, event, finish_turn, allow_private, is_private, is_admin
 ):
-    """Allow actual submission while preserving configured API restrictions."""
+    """Allow actual submission through either API regardless of preference."""
     service.api.config["allow_non_admin_private_chat"] = allow_private
     event.is_private_chat.return_value = is_private
     event.is_admin.return_value = is_admin
@@ -90,22 +77,17 @@ async def test_allowed_chats_keep_existing_tool_behavior(
     for tool in service.context.add_llm_tools.call_args.args:
         arguments: dict[str, object] = {}
         if not tool.name.startswith("get_"):
-            arguments = {"prompt": {"text": "cat"}}
+            arguments = {"prompt": "cat", "description": "A cat"}
             if tool.api_name == "image":
                 arguments["description"] = "cat"
         result = await tool.call(context, **arguments)
-        if tool.api_name not in (service.preferred_api, service.alternative_api):
-            assert "disabled" in result
-        elif tool.name.startswith("get_"):
-            assert service.instruction_tools[tool.api_name].guide in result
+        if tool.name.startswith("get_"):
+            assert service.instructions_tool.guide in result
         else:
             assert "request body was sent successfully" in result
     await finish_turn()
-    for name, api in service.apis.items():
-        if name in (service.preferred_api, service.alternative_api):
-            api.generate.assert_awaited_once()
-        else:
-            api.generate.assert_not_awaited()
+    for api in service.apis.values():
+        api.generate.assert_awaited_once()
 
 
 def test_private_chat_setting_defaults_to_disabled():

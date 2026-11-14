@@ -13,19 +13,17 @@ from data.plugins.astrbot_plugin_openai_image_generation.src.generate import (
     REQUEST_SCHEMA,
     ImageGenerationError,
 )
-from data.plugins.astrbot_plugin_openai_image_generation.src.image_api.generate import (
+from data.plugins.astrbot_plugin_openai_image_generation.src.image_api import (
     INPUT_SCHEMA,
     ImageAPI,
 )
 from PIL import Image
 
-ARGUMENTS = {"description": "A cat", "prompt": {"text": "cat"}}
+ARGUMENTS = {"description": "A cat", "prompt": "cat"}
 
 
 def test_defaults_and_fixed_fields(api):
-    payload, refs = api.prepare(
-        {"description": "A cat", "prompt": {"text": " Draw a cat "}}
-    )
+    payload, refs = api.prepare({"description": "A cat", "prompt": " Draw a cat "})
     assert refs == []
     assert payload == {
         "model": "gpt-image-2.6-sunburst",
@@ -52,16 +50,18 @@ def test_size_boundaries(api, size):
 @pytest.mark.parametrize(
     "options",
     [
-        {"prompt": "cat"},
+        {"prompt": {"text": "cat"}},
         {"model": "gpt-image-1"},
         {"number_of_images": 0},
         {"number_of_images": 6},
-        {"prompt": {"text": "cat", "images": [1, 1]}},
-        {"prompt": {"text": "cat", "images": ["/etc/passwd"]}},
+        {"prompt": "cat", "reference_images": [0, 0], "description": "A cat"},
+        {"prompt": "cat", "reference_images": ["/etc/passwd"], "description": "A cat"},
         {"stream": True},
         {"api": "chat"},
         {"llm": "gpt-6-astra"},
         {"previous_response_id": "resp_previous"},
+        {"web_search": True},
+        {"web_search": False},
         {"reasoning": {"effort": "high"}},
         {"reasoning_effort": "high"},
         {"moderation": "auto"},
@@ -83,7 +83,7 @@ def test_schema_rejects_unsupported_arguments(api, options):
         ({"size": "512x512"}, "pixel count"),
         ({"size": "3840x3840"}, "pixel count"),
         ({"description": "   "}, "description must not be blank"),
-        ({"prompt": {"text": "   "}}, "prompt must not be blank"),
+        ({"prompt": "   ", "description": "A cat"}, "prompt must not be blank"),
     ],
 )
 def test_invalid_values(api, options, reason):
@@ -93,7 +93,9 @@ def test_invalid_values(api, options, reason):
 
 def test_null_options_use_defaults(api):
     default, _ = api.prepare(ARGUMENTS)
-    options = dict.fromkeys(set(INPUT_SCHEMA["properties"]) - {"prompt", "description"})
+    options = dict.fromkeys(
+        set(INPUT_SCHEMA["properties"]) - {"prompt", "description", "reference_images"}
+    )
     actual, _ = api.prepare({**ARGUMENTS, **options})
     assert actual == default
 
@@ -114,8 +116,8 @@ async def test_api_contract_and_original_bytes(api, tmp_path, webp, with_referen
     )
     arguments = {
         "description": "A cat",
-        "prompt": {"text": "  cat  ", "images": [1] if with_reference else []},
-        "model": "flare",
+        "prompt": "  cat  ",
+        "reference_images": [0] if with_reference else [],
         "quality": "max",
         "complexity": "low",
         "size": None,
@@ -151,7 +153,7 @@ async def test_api_contract_and_original_bytes(api, tmp_path, webp, with_referen
     if with_reference:
         expected["images"] = [{"image_url": "data:image/webp;base64," + encoded}]
     assert body == expected
-    assert body["model"] == "gpt-image-2.6-flare"
+    assert body["model"] == "gpt-image-2.6-sunburst"
     assert body["quality"] == "max"
     assert body["complexity"] == "low"
     assert body["background"] == "transparent"

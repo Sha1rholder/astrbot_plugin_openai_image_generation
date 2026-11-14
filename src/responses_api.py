@@ -1,6 +1,6 @@
 """Optimize prompts and call the image generation tool through the Responses API."""
 
-# Explicit OpenAI LLM and image generation model selection is retained for future development, but intentionally not exposed to callers in the tool prompt.
+# Model selection remains internal; tool callers use the shared image contract.
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from ..generate import (
+from .generate import (
     REQUEST_SCHEMA,
     STORAGE_LOCK,
     BaseImageAPI,
@@ -29,14 +29,15 @@ RESPONSES_MODELS = {
 
 
 class ResponsesAPI(BaseImageAPI):
-    """Optimize prompts with an LLM and generate images through the Responses API."""
+    """Optimize prompts with an LLM and generate images through Responses API."""
 
     api_name = "responses"
     generation_tool_name = "openai_image_generate_webp_responses_api"
-    instructions_tool_name = "get_openai_image_generate_webp_instructions_responses_api"
-    guide = Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
-    input_schema = deepcopy(REQUEST_SCHEMA["properties"]["request"])
-    input_schema["properties"].pop("description")
+    input_schema = deepcopy(REQUEST_SCHEMA["$defs"]["shared_request"])
+    input_schema["properties"].update(
+        deepcopy(REQUEST_SCHEMA["$defs"]["responses_request"]["properties"])
+    )
+    input_schema["additionalProperties"] = False
     tool_description = "Generate static WebP with automatic prompt optimization using OpenAI Responses API."
 
     def __init__(self, config: Mapping[str, Any], plugin_dir: Path) -> None:
@@ -49,32 +50,26 @@ class ResponsesAPI(BaseImageAPI):
                 "responses_api_default_llm (legacy responses_default_llm) must be astra, sol, terra or luna."
             )
         self.default_llm = default_llm
-        self.guide += f"\n\nConfigured default LLM: {default_llm} ({RESPONSES_MODELS[default_llm]})."
-        self.input_schema = deepcopy(self.input_schema)
-        self.input_schema["properties"]["llm"]["default"] = default_llm
 
     def prepare(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
         """Reuse image validation and place rendering options on the hosted tool."""
         image_options, indices = self.prepare_image_options(arguments)
-        prompt = arguments["prompt"]["text"].strip()
-        count = int(arguments.get("number_of_images") or 1)
+        prompt = arguments["prompt"].strip()
+        web_search = arguments.get("web_search", True)
         payload = {
-            "model": RESPONSES_MODELS[arguments.get("llm") or self.default_llm],
+            "model": RESPONSES_MODELS[self.default_llm],
             "input": prompt,
             "instructions": "Briefly describe the image after generate successfully.",
             "tools": [{"type": "image_generation", **image_options}],
             "tool_choice": {"type": "image_generation"},
-            "max_tool_calls": count,
             "store": True,
             "stream": False,
         }
+        if web_search:
+            payload["tools"].append({"type": "web_search", "external_web_access": True})
+            payload["tool_choice"] = "auto"
         if arguments.get("previous_response_id") is not None:
             payload["previous_response_id"] = arguments["previous_response_id"]
-        if count > 1:
-            payload["instructions"] += (
-                f"\n\nGenerate {count} separate images for the user's prompt. "
-                "Call the image generation tool once per image."
-            )
         return payload, indices
 
     @staticmethod
@@ -98,7 +93,7 @@ class ResponsesAPI(BaseImageAPI):
         Args:
             result: The decoded Responses API response.
             request_dir: Existing directory containing the original request.
-            requested: Maximum permitted image count.
+            requested: Unused; the prompt determines the number of returned images.
 
         Returns:
             Saved image paths. Providers without a usable ID still deliver images.
@@ -107,7 +102,7 @@ class ResponsesAPI(BaseImageAPI):
             ImageGenerationError: If image validation fails.
             OSError: If image or archive writes fail.
         """
-        paths = super().save_images(result, request_dir, requested)
+        paths = super().save_images(result, request_dir, None)
         response_id = result.get("id") if isinstance(result, dict) else None
         if (
             isinstance(response_id, str)
@@ -131,12 +126,22 @@ class ResponsesAPI(BaseImageAPI):
         return paths
 
     @staticmethod
-    def response_description(result: object, arguments: dict[str, Any]) -> str:
-        """Collect assistant output text without exposing reasoning or tool metadata."""
+    def response_text(result: object) -> str:
+        """Collect assistant output and refusals for private agent feedback.
+
+        Args:
+            result: Decoded Responses API response, including incomplete results.
+
+        Returns:
+            Assistant text without reasoning or tool metadata.
+        """
         if not isinstance(result, dict):
             return ""
+        output = result.get("output")
+        if not isinstance(output, list):
+            return ""
         parts = []
-        for item in result.get("output", []):
+        for item in output:
             if not isinstance(item, dict) or item.get("type") != "message":
                 continue
             if item.get("role", "assistant") != "assistant":
@@ -145,8 +150,15 @@ class ResponsesAPI(BaseImageAPI):
             if not isinstance(content, list):
                 continue
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "output_text":
-                    text = part.get("text")
+                if isinstance(part, dict) and part.get("type") in (
+                    "output_text",
+                    "refusal",
+                ):
+                    text = (
+                        part.get("text")
+                        if part["type"] == "output_text"
+                        else part.get("refusal")
+                    )
                     if isinstance(text, str) and text.strip():
                         parts.append(text.strip())
         return "\n\n".join(parts)
@@ -159,7 +171,7 @@ class ResponsesAPI(BaseImageAPI):
             or result.get("status", "completed") != "completed"
         ):
             raise ImageGenerationError(
-                "The Responses API did not complete the request. "
+                "Responses API did not complete the request. "
                 + json.dumps(
                     {
                         key: result.get(key)
@@ -169,12 +181,12 @@ class ResponsesAPI(BaseImageAPI):
                     else {"error": "Invalid response object"},
                     ensure_ascii=False,
                 )[:2000]
-                + " Do not automatically retry."
+                + " Ask for permission before retry."
             )
         output = result.get("output")
         if not isinstance(output, list):
             raise ImageGenerationError(
-                "The Responses API returned no valid output list. Do not automatically retry."
+                "Responses API returned no valid output list. Ask for permission before retry."
             )
         images = [
             item
@@ -195,6 +207,6 @@ class ResponsesAPI(BaseImageAPI):
                     ],
                     ensure_ascii=False,
                 )[:2000]
-                + " Do not automatically retry."
+                + " Ask for permission before retry."
             )
         return [item.get("result") for item in images]
