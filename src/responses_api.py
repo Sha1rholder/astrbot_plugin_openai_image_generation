@@ -51,9 +51,11 @@ class ResponsesAPI(BaseImageAPI):
             )
         self.default_llm = default_llm
 
-    def prepare(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
+    def prepare(
+        self, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[int | str]]:
         """Reuse image validation and place rendering options on the hosted tool."""
-        image_options, indices = self.prepare_image_options(arguments)
+        image_options, references = self.prepare_image_options(arguments)
         prompt = arguments["prompt"].strip()
         web_search = arguments.get("web_search", True)
         payload = {
@@ -70,7 +72,7 @@ class ResponsesAPI(BaseImageAPI):
             payload["tool_choice"] = "auto"
         if arguments.get("previous_response_id") is not None:
             payload["previous_response_id"] = arguments["previous_response_id"]
-        return payload, indices
+        return payload, references
 
     @staticmethod
     def build_request(

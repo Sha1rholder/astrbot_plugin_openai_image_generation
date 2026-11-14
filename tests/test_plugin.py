@@ -47,7 +47,10 @@ def test_registered_tools_have_plugin_ownership(service):
         properties = tool.parameters["properties"]
         assert "description" in tool.parameters["required"]
         assert properties["prompt"]["type"] == "string"
-        assert properties["reference_images"]["items"]["minimum"] == 0
+        assert properties["reference_images"]["items"]["anyOf"][0] == {
+            "type": "integer",
+            "minimum": 0,
+        }
         assert "api" not in properties
         assert "llm" not in properties
         assert "model" not in properties
@@ -1056,7 +1059,7 @@ def test_documented_json_examples_match_tool_schemas(service):
     import re
 
     examples = re.findall(r"```json\n(.*?)\n```", service.instructions_tool.guide, re.S)
-    assert len(examples) == 6
+    assert len(examples) == 7
     for example in examples:
         arguments = json.loads(example)
         for api in service.apis.values():

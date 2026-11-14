@@ -15,7 +15,7 @@ from .generate import ImageGenerationError
 if TYPE_CHECKING:
     from .service import ImageService
 
-INSTRUCTIONS_TOOL_DESCRIPTION = "Check API key configuration, then read image generation instructions and available reference image indices."
+INSTRUCTIONS_TOOL_DESCRIPTION = "Check API key configuration, then read image generation instructions, local reference path usage and available attachment indices."
 
 
 class InstructionsTool(FunctionTool[AstrAgentContext]):

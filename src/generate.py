@@ -31,6 +31,8 @@ REQUEST_SCHEMA: dict[str, Any] = json.loads(
 
 
 STORAGE_LOCK = threading.Lock()
+# Leave room for the MIME prefix within the existing 20 MiB data URL limit.
+MAX_REFERENCE_BASE64_LENGTH = 20971520 - 32
 
 
 class ImageGenerationError(Exception):
@@ -98,20 +100,22 @@ class BaseImageAPI(ABC):
         return api_key
 
     @abstractmethod
-    def prepare(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
+    def prepare(
+        self, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[int | str]]:
         """Validate arguments and build the backend-specific request payload."""
         raise NotImplementedError
 
     def prepare_image_options(
         self, arguments: dict[str, Any]
-    ) -> tuple[dict[str, Any], list[int]]:
+    ) -> tuple[dict[str, Any], list[int | str]]:
         """Validate tool arguments and build shared image rendering options.
 
         Args:
             arguments: Untrusted model-supplied arguments.
 
         Returns:
-            Image rendering options and the selected attachment indices.
+            Image rendering options and the selected attachment indices or paths.
 
         Raises:
             ImageGenerationError: If any argument violates the supported contract.
@@ -161,7 +165,8 @@ class BaseImageAPI(ABC):
             "partial_images": 0,
         }
         return image_options, [
-            int(index) for index in arguments.get("reference_images", [])
+            reference if isinstance(reference, str) else int(reference)
+            for reference in arguments.get("reference_images", [])
         ]
 
     def storage_limit(self) -> int:
@@ -350,9 +355,7 @@ class BaseImageAPI(ABC):
                 429: "Rate limit or quota exceeded. Check account limits and balance.",
             }.get(response.status_code, "Image service returned an error.")
             if body.get("previous_response_id") and response.status_code in (400, 404):
-                explanation += (
-                    " Previous response may have expired or unavailable on this endpoint/account."
-                )
+                explanation += " Previous response may have expired or unavailable on this endpoint/account."
             raise ImageGenerationError(
                 f"Image generation failed (HTTP {response.status_code}): {explanation} Ask for permission before retry."
             )
@@ -412,10 +415,10 @@ class BaseImageAPI(ABC):
             ImageGenerationError: For invalid or unsupported image attachments.
         """
         images: list[dict[str, str]] = []
-        for encoded in references:
+        for position, encoded in enumerate(references):
             try:
                 # The JSON Image API limits each image URL to 20 MiB.
-                if len(encoded) > 20971520 - 32:
+                if len(encoded) > MAX_REFERENCE_BASE64_LENGTH:
                     raise ValueError
                 raw = base64.b64decode(encoded, validate=True)
                 with Image.open(io.BytesIO(raw)) as image:
@@ -431,7 +434,7 @@ class BaseImageAPI(ABC):
                 Image.DecompressionBombError,
             ):
                 raise ImageGenerationError(
-                    "References must be valid PNG, JPEG or WebP images, under 20 MiB after base64 encoding."
+                    f"Invalid reference_images[{position}]. References must be valid PNG, JPEG or WebP images, under 20 MiB after base64 encoding."
                 ) from None
             images.append({"image_url": f"data:{mime};base64,{encoded}"})
         return images

@@ -28,15 +28,17 @@ class ImageAPI(BaseImageAPI):
     input_schema = INPUT_SCHEMA
     tool_description = "Generate static WebP with OpenAI Image API."
 
-    def prepare(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
+    def prepare(
+        self, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[int | str]]:
         """Validate arguments and add the Image API prompt and output count."""
-        image_options, indices = self.prepare_image_options(arguments)
+        image_options, references = self.prepare_image_options(arguments)
         return {
             **image_options,
             "prompt": arguments["prompt"].strip(),
             "n": int(arguments.get("number_of_images") or 1),
             "stream": False,
-        }, indices
+        }, references
 
     @staticmethod
     def build_request(
