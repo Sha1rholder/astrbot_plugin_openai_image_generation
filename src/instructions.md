@@ -30,7 +30,7 @@ For Responses API, you're instructing an LLM with image generation tools instead
 {"prompt":"先搜索什么是“奶龙”，然后用它的形象生成3张富有创意的奶龙大笑图","description":"创意大笑奶龙"}
 ```
 
-For newly supplied reference images, the instructions tool lists available indices below. Indices start at 0, with current message images first, followed by quoted images. Select up to 16 indices in `reference_images`, in the order you describe them. These indices refer only to listed attachments, not images in earlier conversation history or archive directories.
+For image edit requests, user must attach or quote the image in the current message. If missing, ask user to send it. Select up to 16 indices in `reference_images`, in the order you describe them. These indices refer only to listed attachments, not images in earlier conversation history or archive directories.
 
 ```json
 {"prompt":"把图改为水彩画风","description":"水彩白毛红瞳少女","reference_images":[0]}
@@ -49,8 +49,6 @@ To utilize the functionality of Image API, you should provide more detailed desc
 ```json
 {"prompt":"画一幅日系二次元哥特洛丽塔少女人设图。她身材苗条，曲线优美，仪态端庄，正面直视镜头，双手自然交叠于身前，表现出典雅、乖巧而淡漠的气质。她身着一身女仆装，头发黑长直及腰，留有整齐的空气感齐刘海，有明亮的血红色瞳孔，神情温柔。她佩戴白色褶边蕾丝女仆发箍，左右两侧装饰有精巧浅色缎带蝴蝶结；身穿深黑色古典长袖女仆连衣裙，胸前饰有黑色大蝴蝶结，中央镶嵌一枚椭圆形宝石胸针；泡泡袖配白色纽扣袖口，胸前竖褶花边，收腰白色荷叶边围裙，背后巨型缎带蝴蝶结，多层黑色花纹刺绣蓬蓬长裙，层叠白色蕾丝裙摆；裙下露出一小截白色丝袜，穿黑色玛丽珍鞋","description":"典雅洛丽塔女仆人设","size":"2560x1440","quality":"xhigh"}
 ```
-
-To make follow-up edits in Image API, reference previously generated images.
 
 ```json
 {"prompt":"把图中机器人表情改为困惑","description":"困惑的机器人","reference_images":[0]}
