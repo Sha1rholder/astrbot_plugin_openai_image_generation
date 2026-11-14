@@ -9,11 +9,12 @@ import httpx
 import pytest
 from astrbot.api.message_components import Image
 
+pytestmark = pytest.mark.asyncio
+
 ARGUMENTS = {"prompt": "cat", "description": "A cat"}
 SENT = "request body was sent successfully"
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("api_name", ["image", "responses"])
 @pytest.mark.parametrize("status", [200, 401])
 async def test_real_http_submission_returns_before_response_headers(
@@ -62,11 +63,7 @@ async def test_real_http_submission_returns_before_response_headers(
     api.client = httpx.AsyncClient(
         base_url=f"http://127.0.0.1:{port}/v1/", trust_env=False
     )
-    arguments = {
-        **ARGUMENTS,
-        **({"description": "cat"} if api.api_name == "image" else {}),
-    }
-    call = asyncio.create_task(service.generate(event, arguments, api_name))
+    call = asyncio.create_task(service.generate(event, ARGUMENTS, api_name))
     try:
         await asyncio.wait_for(received.wait(), 2)
         result = await asyncio.wait_for(asyncio.shield(call), 2)
@@ -97,11 +94,12 @@ async def test_real_http_submission_returns_before_response_headers(
         await asyncio.wait_for(handled.wait(), 2)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stage", ["connect", "write", "proxy_connect", "http_rejection"]
 )
-async def test_pre_submission_transport_failure_returns_to_model(service, event, stage):
+async def test_pre_submission_transport_failure_returns_to_model(
+    service, event, stage, mock_http
+):
     """Neither entering post() nor sending a proxy CONNECT counts as submission."""
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -124,9 +122,7 @@ async def test_pre_submission_transport_failure_returns_to_model(service, event,
             raise httpx.WriteError("private")
         raise httpx.ConnectError("private")
 
-    service.api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(fail)
-    )
+    mock_http(service.api, fail)
     call = asyncio.create_task(service.generate(event, ARGUMENTS))
     try:
         await asyncio.wait_for(entered.wait(), 1)
@@ -147,8 +143,7 @@ async def test_pre_submission_transport_failure_returns_to_model(service, event,
         await asyncio.gather(call, return_exceptions=True)
 
 
-@pytest.mark.asyncio
-async def test_invalid_reference_payload_returns_to_model(service, event):
+async def test_invalid_reference_payload_returns_to_model(service, event, mock_http):
     """Readable attachments still need format validation before acknowledging submission."""
     event.get_messages.return_value = [Image.fromBase64("invalid-image")]
     requests = []
@@ -157,10 +152,7 @@ async def test_invalid_reference_payload_returns_to_model(service, event):
         requests.append(request)
         raise AssertionError("Invalid references must not trigger an HTTP request")
 
-    service.api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/",
-        transport=httpx.MockTransport(unexpected_request),
-    )
+    mock_http(service.api, unexpected_request)
     result = await service.generate(
         event, {"prompt": "cat", "reference_images": [0], "description": "A cat"}
     )
@@ -171,10 +163,9 @@ async def test_invalid_reference_payload_returns_to_model(service, event):
     assert not service._pending_requests
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["http11", "http2"])
 async def test_body_started_does_not_release_tool_but_completed_does(
-    service, event, protocol, finish_turn
+    service, event, protocol, finish_turn, mock_http
 ):
     """A partial upload must remain blocking for both supported HTTP protocols."""
     started = asyncio.Event()
@@ -195,9 +186,7 @@ async def test_body_started_does_not_release_tool_but_completed_does(
         await finish_response.wait()
         raise httpx.ReadTimeout("private")
 
-    service.api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(transport)
-    )
+    mock_http(service.api, transport)
     call = asyncio.create_task(service.generate(event, ARGUMENTS))
     try:
         await asyncio.wait_for(started.wait(), 1)
@@ -221,8 +210,9 @@ async def test_body_started_does_not_release_tool_but_completed_does(
         await asyncio.gather(call, return_exceptions=True)
 
 
-@pytest.mark.asyncio
-async def test_cancelling_tool_before_submission_cancels_pending_upload(service, event):
+async def test_cancelling_tool_before_submission_cancels_pending_upload(
+    service, event, mock_http
+):
     """Timed out tool calls must not submit a request later in the background."""
     entered = asyncio.Event()
     cancelled = asyncio.Event()
@@ -235,9 +225,7 @@ async def test_cancelling_tool_before_submission_cancels_pending_upload(service,
         finally:
             cancelled.set()
 
-    service.api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(transport)
-    )
+    mock_http(service.api, transport)
     call = asyncio.create_task(service.generate(event, ARGUMENTS))
     await asyncio.wait_for(entered.wait(), 1)
     call.cancel()
@@ -249,7 +237,6 @@ async def test_cancelling_tool_before_submission_cancels_pending_upload(service,
     service.context.send_message.assert_not_awaited()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("explanation", ["error", "empty"])
 async def test_failure_explanation_fallback_never_sends_internal_instructions(
     service, event, finish_turn, explanation

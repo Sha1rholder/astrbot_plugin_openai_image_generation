@@ -7,7 +7,7 @@ desc: |
   The plugin uses Responses API by default, but also allows Image API. You can instruct agent to use the prefered API.
 
   OpenAI's built-in web search tool is enabled in Responses API so it can automaticly search for reference images in case it needs.
-version: v0.3.0
+version: v0.3.1
 author: Sha1rholder
 repo: https://github.com/Sha1rholder/astrbot_plugin_openai_image_generation
 astrbot_version: ">=4.30.0"

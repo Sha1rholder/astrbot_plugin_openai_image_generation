@@ -139,10 +139,16 @@
         },
         "reference_images": {
           "type": "array",
-          "description": "Zero-based attachment indices from the instructions tool, current message images first, then quoted images. Select in prompt order. Omit for text-only generation. Attachment bytes are not archived.",
+          "description": "Ordered attachment indices or absolute local image paths on the AstrBot host. Indices are zero-based, current message images first, then quoted images. Paths must end in .jpg, .jpeg, .png or .webp (case insensitive). Indices and paths may be mixed, up to 16 total. Omit for text-only generation. Reference bytes are not archived.",
           "items": {
-            "type": "integer",
-            "minimum": 0
+            "anyOf": [
+              {"type": "integer", "minimum": 0},
+              {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\.([jJ][pP][eE]?[gG]|[pP][nN][gG]|[wW][eE][bB][pP])$"
+              }
+            ]
           },
           "maxItems": 16,
           "uniqueItems": true

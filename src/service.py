@@ -19,7 +19,7 @@ from astrbot.api.star import Context
 from astrbot.core.agent.input import PlainInput
 
 from . import create_tools
-from .generate import BaseImageAPI, ImageGenerationError
+from .generate import MAX_REFERENCE_BASE64_LENGTH, BaseImageAPI, ImageGenerationError
 from .history import RequestHistory
 
 PRIVATE_CHAT_RESTRICTION = (
@@ -118,6 +118,43 @@ class ImageService:
             return PRIVATE_CHAT_RESTRICTION
         return self.instructions_tool.instructions(event)
 
+    @staticmethod
+    def _local_reference(value: str) -> MessageImage:
+        """Snapshot a local reference before queued work can prune its archive.
+
+        Args:
+            value: Absolute image path on the AstrBot host.
+
+        Returns:
+            An image component containing the bounded file contents.
+
+        Raises:
+            ImageGenerationError: If the path or image size is unsupported.
+            OSError: If the file cannot be read.
+        """
+        path = Path(value)
+        if not path.is_absolute() or path.suffix.lower() not in {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+        }:
+            raise ImageGenerationError(
+                "Use an absolute path on the AstrBot host ending in .jpg, .jpeg, .png or .webp."
+            )
+        if not path.is_file():
+            raise ImageGenerationError(
+                "The local reference must be an existing regular file."
+            )
+        limit = MAX_REFERENCE_BASE64_LENGTH // 4 * 3
+        with path.open("rb") as source:
+            raw = source.read(limit + 1)
+        if len(raw) > limit:
+            raise ImageGenerationError(
+                "The local reference exceeds the 20 MiB encoded image limit."
+            )
+        return MessageImage.fromBytes(raw)
+
     def add_image_hint(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         """Unconditionally append injection.md once per request."""
         if event not in self._turn_finished:
@@ -172,7 +209,7 @@ class ImageService:
             return "The image plugin is shutting down. No image task was queued."
         arguments = deepcopy(arguments)
         try:
-            payload, indices = api.prepare(arguments)
+            payload, reference_inputs = api.prepare(arguments)
         except ImageGenerationError as exc:
             return str(exc)
         references = self.reference_images(event)
@@ -205,9 +242,28 @@ class ImageService:
                 api.require_api_key()
             except ImageGenerationError as exc:
                 return str(exc)
-            if any(index >= len(references) for index in indices):
+            if any(
+                isinstance(item, int) and item >= len(references)
+                for item in reference_inputs
+            ):
                 return f"Reference image index does not exist. No API request was made. Call {self.instructions_tool.name} for available indices, correct the arguments, then call the generation tool again."
-            selected = [(index, references[index]) for index in indices]
+            selected: list[tuple[int, MessageImage]] = []
+            for position, item in enumerate(reference_inputs):
+                if isinstance(item, int):
+                    selected.append((position, references[item]))
+                    continue
+                try:
+                    reference = await asyncio.to_thread(self._local_reference, item)
+                except (ImageGenerationError, OSError, ValueError) as exc:
+                    detail = (
+                        str(exc)
+                        if isinstance(exc, ImageGenerationError)
+                        else "Could not read the local image. Check its path and file permissions."
+                    )
+                    return f"Invalid reference_images[{position}]: {detail} No API request was made."
+                selected.append((position, reference))
+            if self._stopping:
+                return "The image plugin is shutting down. No image task was queued."
             submitted: asyncio.Future[str | None] = (
                 asyncio.get_running_loop().create_future()
             )
@@ -274,7 +330,7 @@ class ImageService:
             event: Original event used for result builders and QQ reply credentials.
             arguments: Snapshot of the original tool arguments.
             payload: Validated request body for the selected API.
-            references: Selected reference indices and attachments.
+            references: Reference list positions and selected image snapshots.
             origin: Original conversation identifier for proactive delivery.
             request_dir: Numbered directory reserved before the tool acknowledgement.
             turn_finished: Gate released only after the foreground reply finishes.
@@ -431,7 +487,7 @@ class ImageService:
             event: Destination and source of reference images.
             arguments: Arguments supplied by the language model.
             payload: Validated request body for the selected API.
-            references: Selected reference indices and attachment snapshots.
+            references: Reference list positions and selected image snapshots.
             request_dir: Existing directory containing the original request.
             api: Backend captured when the request was accepted.
             on_request_sent: Callback after the API request body is transmitted.
@@ -441,7 +497,7 @@ class ImageService:
             A combined image message or a safe failure notification.
         """
         try:
-            # Resolve only explicitly selected attachments, never model-supplied paths.
+            # Local files were snapshotted before enqueueing; load selected attachments.
             encoded_images: list[str] = []
             for index, reference in references:
                 try:
@@ -453,7 +509,7 @@ class ImageService:
                     self.logger.warning(
                         "Reference image loading failed: %s", type(exc).__name__
                     )
-                    return f"Could not read reference image {index}. Please resend it. No API request was made."
+                    return f"Could not read reference_images[{index}]. Please resend the attachment or check the local path. No API request was made."
             paths = await api.generate(
                 payload,
                 encoded_images,

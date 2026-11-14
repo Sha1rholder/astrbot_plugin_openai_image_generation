@@ -1,7 +1,6 @@
 """Test the Responses API contract and persistence."""
 
 import base64
-import io
 import json
 from pathlib import Path
 
@@ -11,7 +10,6 @@ import yaml
 from data.plugins.astrbot_plugin_openai_image_generation.src.generate import (
     ImageGenerationError,
 )
-from PIL import Image
 
 ARGUMENTS = {"prompt": "cat", "description": "A cat"}
 
@@ -73,17 +71,14 @@ def test_responses_default_options(responses_api):
 )
 @pytest.mark.parametrize("count", [1, 3])
 async def test_responses_references_and_image_options(
-    responses_api, tmp_path, webp, settings, count
+    responses_api, tmp_path, webp, settings, count, mock_http, image_bytes
 ):
-    png = io.BytesIO()
-    Image.new("RGB", (16, 16)).save(png, "PNG")
-    refs = [base64.b64encode(raw).decode() for raw in (webp, png.getvalue())]
+    refs = [base64.b64encode(raw).decode() for raw in (webp, image_bytes("PNG"))]
     arguments = {
         **ARGUMENTS,
         **settings,
         "prompt": f"Generate {count} edited images",
         "reference_images": [1, 0],
-        "description": "A cat",
         "quality": "xhigh",
         "complexity": "low",
         "size": "1536x1024",
@@ -96,17 +91,16 @@ async def test_responses_references_and_image_options(
         body = json.loads(request.content)
         assert body["previous_response_id"] == "resp_previous"
         assert body["store"] is True
+        assert "max_tool_calls" not in body
         if settings.get("web_search", True):
             assert body["tools"][1:] == [
                 {"type": "web_search", "external_web_access": True}
             ]
             assert body["tool_choice"] == "auto"
-            assert "max_tool_calls" not in body
             assert "Generate" not in body["instructions"]
         else:
             assert len(body["tools"]) == 1
             assert body["tool_choice"] == {"type": "image_generation"}
-            assert "max_tool_calls" not in body
             assert "web search" not in body["instructions"]
         assert body["input"] == [
             {
@@ -135,17 +129,9 @@ async def test_responses_references_and_image_options(
         ]
         if settings.get("web_search", True):
             output.insert(0, {"type": "web_search_call", "status": "completed"})
-        return httpx.Response(
-            200,
-            json={
-                "output": output,
-            },
-        )
+        return httpx.Response(200, json={"output": output})
 
-    responses_api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/",
-        transport=httpx.MockTransport(respond),
-    )
+    mock_http(responses_api, respond)
     payload, indices = responses_api.prepare(arguments)
     paths = await responses_api.generate(
         payload, [refs[i] for i in indices], tmp_path, arguments
@@ -160,7 +146,7 @@ async def test_responses_references_and_image_options(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 404])
 async def test_unavailable_previous_response_is_not_retried(
-    responses_api, tmp_path, status
+    responses_api, tmp_path, status, mock_http
 ):
     requests = []
 
@@ -168,10 +154,7 @@ async def test_unavailable_previous_response_is_not_retried(
         requests.append(json.loads(request.content))
         return httpx.Response(status, json={"error": {"message": "Not found"}})
 
-    responses_api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/",
-        transport=httpx.MockTransport(respond),
-    )
+    mock_http(responses_api, respond)
     arguments = {**ARGUMENTS, "previous_response_id": "resp_expired"}
     payload, _ = responses_api.prepare(arguments)
     with pytest.raises(

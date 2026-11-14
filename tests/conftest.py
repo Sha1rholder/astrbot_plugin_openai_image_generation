@@ -6,6 +6,7 @@ import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, create_autospec
 
+import httpx
 import pytest
 import pytest_asyncio
 from PIL import Image
@@ -25,11 +26,33 @@ def isolate_credentials(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
+@pytest.fixture(scope="session")
+def image_bytes():
+    def create(format_name="WEBP", color="blue"):
+        output = io.BytesIO()
+        Image.new("RGB", (16, 16), color).save(output, format_name)
+        return output.getvalue()
+
+    return create
+
+
+@pytest.fixture(scope="session")
+def webp(image_bytes):
+    return image_bytes()
+
+
 @pytest.fixture
-def webp():
-    output = io.BytesIO()
-    Image.new("RGB", (16, 16), "blue").save(output, "WEBP")
-    return output.getvalue()
+def mock_http():
+    """Install a mock transport; the backend fixture owns client cleanup."""
+
+    def install(api, handler):
+        api.client = httpx.AsyncClient(
+            base_url="https://example.invalid/v1/",
+            transport=httpx.MockTransport(handler),
+        )
+        return api.client
+
+    return install
 
 
 @pytest.fixture
@@ -92,6 +115,16 @@ async def plugin(request, tmp_path, monkeypatch):
 @pytest.fixture
 def service(plugin):
     return plugin.service
+
+
+@pytest.fixture
+def tool_context(service, event):
+    from astrbot.core.agent.run_context import ContextWrapper
+    from astrbot.core.astr_agent_context import AstrAgentContext
+
+    return ContextWrapper(
+        context=AstrAgentContext(context=service.context, event=event)
+    )
 
 
 @pytest.fixture
