@@ -339,7 +339,7 @@ async def test_astrbot_executor_to_http_to_delivery(
 ):
     """Verify one automatic message contains the description and every returned image."""
     api = service.apis[api_name]
-    api.config["user_max_images"] = 5
+    api.config["per_user_max_images"] = 5
     outputs = [image_bytes(color=(index * 50, 0, 255)) for index in range(returned)]
     description = "窗边的橘猫\n水彩插画"
     event.chain_result.side_effect = lambda components: (

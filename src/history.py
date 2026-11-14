@@ -75,13 +75,15 @@ class RequestHistory:
             staging.write_text("\n".join(lines) + "\n", encoding="utf-8")
             staging.replace(path)
 
-    def _quota_settings(self, scope: str, default_maximum: int) -> tuple[int, int]:
+    def _quota_settings(
+        self, maximum_key: str, default_maximum: int
+    ) -> tuple[int, int]:
         """Validate the live nonnegative window and image count settings."""
-        window_minutes = self.config.get(f"{scope}_window_minutes", 360)
-        maximum = self.config.get(f"{scope}_max_images", default_maximum)
+        window_minutes = self.config.get("sliding_window", 360)
+        maximum = self.config.get(maximum_key, default_maximum)
         for name, value in (
-            (f"{scope}_window_minutes", window_minutes),
-            (f"{scope}_max_images", maximum),
+            ("sliding_window", window_minutes),
+            (maximum_key, maximum),
         ):
             if type(value) is not int or value < 0:
                 raise ImageGenerationError(f"{name} must be a nonnegative integer.")
@@ -107,7 +109,7 @@ class RequestHistory:
 
     def _check_total_quota(self, log_path: Path, requested: int, now: int) -> None:
         """Count every accepted request, including administrators, in the total window."""
-        window_minutes, maximum = self._quota_settings("total", 30)
+        window_minutes, maximum = self._quota_settings("total_max_images", 30)
         if window_minutes == 0:
             return
         used = 0
@@ -140,7 +142,7 @@ class RequestHistory:
         self, log_path: Path, user_id: str, requested: int, now: int
     ) -> None:
         """Read persisted receipts and YAML counts before accepting another request."""
-        window_minutes, maximum = self._quota_settings("user", 3)
+        window_minutes, maximum = self._quota_settings("per_user_max_images", 3)
         if window_minutes == 0:
             return
         cutoff = now - window_minutes * 60

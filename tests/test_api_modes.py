@@ -47,7 +47,7 @@ async def test_preference_hint_and_both_guides(plugin, service, event, tool_cont
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("quota_scope", ["user", "total"])
+@pytest.mark.parametrize("quota_scope", ["per_user", "total"])
 async def test_both_apis_share_quota(
     plugin, service, event, webp, quota_scope, mock_http, tool_context
 ):
