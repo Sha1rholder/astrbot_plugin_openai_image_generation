@@ -10,11 +10,13 @@ from astrbot.api import AstrBotConfig
 from data.plugins.astrbot_plugin_openai_image_generation import main as plugin_module
 
 NOW = 1_800_000_000
+pytestmark = pytest.mark.asyncio
+
 ARGUMENTS = {"prompt": "cat", "description": "A cat"}
 
 
 @pytest.fixture
-def quota_service(service, monkeypatch):
+def service(service, monkeypatch):
     service.preferred_api = "image"
     monkeypatch.setattr(time, "time", lambda: NOW)
     service.api.generate = AsyncMock(return_value=[])
@@ -32,11 +34,9 @@ def add_history(service, timestamp, count: int | None = 1, user_id="123456"):
     return directory
 
 
-@pytest.mark.asyncio
 async def test_quota_counts_images_and_rejection_does_not_record(
-    quota_service, event, finish_turn
+    service, event, finish_turn
 ):
-    service = quota_service
     add_history(service, NOW - 1, count=2)
     original_log = (service.requests_dir / "123456.log").read_bytes()
     result = await service.generate(event, {**ARGUMENTS, "number_of_images": 2})
@@ -55,11 +55,9 @@ async def test_quota_counts_images_and_rejection_does_not_record(
     service.api.generate.assert_awaited_once()
 
 
-@pytest.mark.asyncio
 async def test_default_window_boundary_and_expired_missing_yaml(
-    quota_service, event, finish_turn
+    service, event, finish_turn
 ):
-    service = quota_service
     # Exactly 360 minutes old is outside the window and needs no YAML read.
     expired = add_history(service, NOW - 360 * 60, count=5)
     (expired / "request.yaml").unlink()
@@ -71,11 +69,9 @@ async def test_default_window_boundary_and_expired_missing_yaml(
     assert "3/3 images used" in await service.generate(event, ARGUMENTS)
 
 
-@pytest.mark.asyncio
 async def test_custom_window_slides_and_configuration_is_read_each_call(
-    quota_service, event, monkeypatch, finish_turn
+    service, event, monkeypatch, finish_turn
 ):
-    service = quota_service
     service.api.config.update(user_window_minutes=2, user_max_images=2)
     add_history(service, NOW - 119, count=2)
     assert "2/2 images used" in await service.generate(event, ARGUMENTS)
@@ -88,11 +84,7 @@ async def test_custom_window_slides_and_configuration_is_read_each_call(
     assert "1/1 images used" in await service.generate(event, ARGUMENTS)
 
 
-@pytest.mark.asyncio
-async def test_omitted_and_null_counts_each_use_one_image(
-    quota_service, event, finish_turn
-):
-    service = quota_service
+async def test_omitted_and_null_counts_each_use_one_image(service, event, finish_turn):
     service.api.config["user_max_images"] = 2
     add_history(service, NOW, count=None)
     assert "request body was sent successfully" in await service.generate(
@@ -102,11 +94,9 @@ async def test_omitted_and_null_counts_each_use_one_image(
     assert "2/2 images used" in await service.generate(event, ARGUMENTS)
 
 
-@pytest.mark.asyncio
 async def test_user_quota_is_shared_across_conversations_but_not_users(
-    quota_service, event, finish_turn
+    service, event, finish_turn
 ):
-    service = quota_service
     add_history(service, NOW, count=3)
     event.unified_msg_origin = "webchat:GroupMessage:another-group"
     assert "limit exceeded" in await service.generate(event, ARGUMENTS)
@@ -117,12 +107,10 @@ async def test_user_quota_is_shared_across_conversations_but_not_users(
     await finish_turn()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ["user", "total"])
 async def test_concurrent_requests_reserve_quota_even_if_generation_fails(
-    quota_service, event, scope, finish_turn
+    service, event, scope, finish_turn
 ):
-    service = quota_service
     other_scope = "total" if scope == "user" else "user"
     service.api.config.update(
         {f"{scope}_max_images": 2, f"{other_scope}_window_minutes": 0}
@@ -155,12 +143,8 @@ async def test_concurrent_requests_reserve_quota_even_if_generation_fails(
     service.api.generate.assert_awaited_once()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ["user", "total"])
-async def test_quota_survives_restart(
-    quota_service, event, scope, finish_turn, tmp_path
-):
-    service = quota_service
+async def test_quota_survives_restart(service, event, scope, finish_turn, tmp_path):
     other_scope = "total" if scope == "user" else "user"
     service.api.config.update(
         {f"{scope}_max_images": 1, f"{other_scope}_window_minutes": 0}
@@ -182,9 +166,7 @@ async def test_quota_survives_restart(
         await restarted.terminate()
 
 
-@pytest.mark.asyncio
-async def test_zero_maximum_rejects_with_actionable_message(quota_service, event):
-    service = quota_service
+async def test_zero_maximum_rejects_with_actionable_message(service, event):
     service.api.config["user_max_images"] = 0
     result = await service.generate(event, ARGUMENTS)
     assert "0/0 images used" in result
@@ -196,11 +178,9 @@ async def test_zero_maximum_rejects_with_actionable_message(quota_service, event
     service.api.generate.assert_not_awaited()
 
 
-@pytest.mark.asyncio
 async def test_zero_window_bypasses_quota_but_keeps_recording(
-    quota_service, event, finish_turn
+    service, event, finish_turn
 ):
-    service = quota_service
     service.api.config.update(user_window_minutes=0, user_max_images=0)
     old = add_history(service, NOW, count=5)
     (old / "request.yaml").unlink()
@@ -212,7 +192,6 @@ async def test_zero_window_bypasses_quota_but_keeps_recording(
     assert service.api.generate.await_count == 2
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "key,value",
     [
@@ -223,9 +202,8 @@ async def test_zero_window_bypasses_quota_but_keeps_recording(
     ],
 )
 async def test_invalid_quota_config_rejected_before_recording(
-    quota_service, event, key, value
+    service, event, key, value
 ):
-    service = quota_service
     service.api.config[key] = value
     result = await service.generate(event, ARGUMENTS)
     assert f"{key} must be a nonnegative integer" in result
@@ -234,12 +212,10 @@ async def test_invalid_quota_config_rejected_before_recording(
     service.api.generate.assert_not_awaited()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("damage", ["missing", "yaml"])
 async def test_incomplete_history_does_not_silently_bypass_quota(
-    quota_service, event, damage
+    service, event, damage
 ):
-    service = quota_service
     directory = add_history(service, NOW, count=2)
     archive_path = directory / "request.yaml"
     if damage == "missing":
@@ -253,9 +229,7 @@ async def test_incomplete_history_does_not_silently_bypass_quota(
     service.api.generate.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_admin_bypass_uses_current_identity(quota_service, event, finish_turn):
-    service = quota_service
+async def test_admin_bypass_uses_current_identity(service, event, finish_turn):
     service.api.config.update(user_max_images=0, total_max_images=0)
     for admin in (True, False, True):
         event.is_admin.return_value = admin
@@ -269,11 +243,9 @@ async def test_admin_bypass_uses_current_identity(quota_service, event, finish_t
     assert len((service.requests_dir / "123456.log").read_text().splitlines()) == 2
 
 
-@pytest.mark.asyncio
 async def test_admin_and_member_usage_together_limit_only_members(
-    quota_service, event, finish_turn
+    service, event, finish_turn
 ):
-    service = quota_service
     service.api.config.update(user_window_minutes=0, total_max_images=5)
     event.is_admin.return_value = True
     assert "request body was sent successfully" in await service.generate(
@@ -302,11 +274,9 @@ async def test_admin_and_member_usage_together_limit_only_members(
     ]
 
 
-@pytest.mark.asyncio
 async def test_total_window_slides_including_admin_receipts(
-    quota_service, event, monkeypatch, finish_turn
+    service, event, monkeypatch, finish_turn
 ):
-    service = quota_service
     service.api.config.update(total_window_minutes=1, total_max_images=5)
     service.requests_dir.mkdir()
     total = service.requests_dir / "total.log"
@@ -321,9 +291,7 @@ async def test_total_window_slides_including_admin_receipts(
     await finish_turn()
 
 
-@pytest.mark.asyncio
-async def test_total_history_error_is_reported_to_agent(quota_service, event):
-    service = quota_service
+async def test_total_history_error_is_reported_to_agent(service, event):
     service.requests_dir.mkdir()
     (service.requests_dir / "total.log").write_text("invalid receipt\n")
     result = await service.generate(event, ARGUMENTS)
@@ -333,11 +301,7 @@ async def test_total_history_error_is_reported_to_agent(quota_service, event):
     assert not service.output_dir.exists()
 
 
-@pytest.mark.asyncio
-async def test_zero_total_window_skips_only_total_check(
-    quota_service, event, finish_turn
-):
-    service = quota_service
+async def test_zero_total_window_skips_only_total_check(service, event, finish_turn):
     service.api.config.update(
         total_window_minutes=0, total_max_images=0, user_max_images=1
     )
@@ -349,11 +313,7 @@ async def test_zero_total_window_skips_only_total_check(
     assert len((service.requests_dir / "total.log").read_text().splitlines()) == 1
 
 
-@pytest.mark.asyncio
-async def test_both_logs_keep_only_latest_1000_receipts(
-    quota_service, event, finish_turn
-):
-    service = quota_service
+async def test_both_logs_keep_only_latest_1000_receipts(service, event, finish_turn):
     service.requests_dir.mkdir()
     user = service.requests_dir / "123456.log"
     total = service.requests_dir / "total.log"
@@ -369,11 +329,9 @@ async def test_both_logs_keep_only_latest_1000_receipts(
     assert total.read_text().splitlines() == total_lines[6:] + [f"{NOW}\tfalse\t1"]
 
 
-@pytest.mark.asyncio
 async def test_user_named_total_cannot_collide_with_aggregate_log(
-    quota_service, event, finish_turn
+    service, event, finish_turn
 ):
-    service = quota_service
     event.get_sender_id.return_value = "total"
     assert "request body was sent successfully" in await service.generate(
         event, ARGUMENTS

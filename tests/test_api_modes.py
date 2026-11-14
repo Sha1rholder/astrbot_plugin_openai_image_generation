@@ -10,8 +10,6 @@ import httpx
 import pytest
 import yaml
 from astrbot.api.provider import ProviderRequest
-from astrbot.core.agent.run_context import ContextWrapper
-from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 @pytest.mark.asyncio
@@ -20,16 +18,13 @@ from astrbot.core.astr_agent_context import AstrAgentContext
     [{}, {"prefer_responses_api": True}, {"prefer_responses_api": False}],
     indirect=True,
 )
-async def test_preference_hint_and_both_guides(plugin, service, event):
+async def test_preference_hint_and_both_guides(plugin, service, event, tool_context):
     """Always prefer Responses API, including with obsolete configuration values."""
     expected_hint = (Path(__file__).parents[1] / "src/injection.md").read_text().strip()
     request = ProviderRequest(system_prompt="Original persona", func_tool=None)
     await plugin.add_image_hint(event, request)
     await plugin.add_image_hint(event, request)
     assert request.system_prompt == "Original persona\n" + expected_hint
-    context = ContextWrapper(
-        context=AstrAgentContext(context=service.context, event=event)
-    )
     tools = service.context.add_llm_tools.call_args.args
     assert tools[0].name == "get_openai_image_generate_webp_instructions"
     assert tools[1].api_name == "responses"
@@ -37,7 +32,7 @@ async def test_preference_hint_and_both_guides(plugin, service, event):
         api.generate = AsyncMock()
     for tool in tools:
         if tool.name.startswith("get_"):
-            result = await tool.call(context)
+            result = await tool.call(tool_context)
             assert service.instructions_tool.guide in result
             assert (
                 "openai_image_generate_webp_responses_api (Use this by default)"
@@ -53,7 +48,9 @@ async def test_preference_hint_and_both_guides(plugin, service, event):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("quota_scope", ["user", "total"])
-async def test_both_apis_share_quota(plugin, service, event, webp, quota_scope):
+async def test_both_apis_share_quota(
+    plugin, service, event, webp, quota_scope, mock_http, tool_context
+):
     """Queue both APIs together and verify routing, archives, delivery, and quotas."""
     service.api.config[f"{quota_scope}_max_images"] = 2
     encoded = base64.b64encode(webp).decode()
@@ -71,38 +68,20 @@ async def test_both_apis_share_quota(plugin, service, event, webp, quota_scope):
             )
         return httpx.Response(200, json={"data": [{"b64_json": encoded}]})
 
-    clients = []
-    for api in service.apis.values():
-        api.client = httpx.AsyncClient(
-            base_url="https://example.invalid/v1/",
-            transport=httpx.MockTransport(respond),
-        )
-        clients.append(api.client)
-    context = ContextWrapper(
-        context=AstrAgentContext(context=service.context, event=event)
-    )
+    clients = [mock_http(api, respond) for api in service.apis.values()]
     tools = [
         tool
         for tool in service.context.add_llm_tools.call_args.args
         if not tool.name.startswith("get_")
     ]
-    calls = []
-    for tool in tools:
-        arguments: dict[str, dict[str, str] | str] = {
-            "prompt": "cat",
-            "description": "A cat",
-        }
-        if tool.api_name == "image":
-            arguments["description"] = "cat"
-        calls.append(tool.call(context, **arguments))
-    results = await asyncio.gather(*calls)
+    arguments = {"prompt": "cat", "description": "A cat"}
+    results = await asyncio.gather(
+        *(tool.call(tool_context, **arguments) for tool in tools)
+    )
     assert all("request body was sent successfully" in result for result in results)
     for tool in tools:
-        arguments = {"prompt": "cat", "description": "A cat"}
-        if tool.api_name == "image":
-            arguments["description"] = "cat"
-        assert "2/2 images used" in await tool.call(context, **arguments)
-    await plugin.mark_agent_finished(event, context, None)
+        assert "2/2 images used" in await tool.call(tool_context, **arguments)
+    await plugin.mark_agent_finished(event, tool_context, None)
     await plugin.release_image_results(event)
     await asyncio.gather(*service._tasks)
     assert {request.url.path for request in requests} == {

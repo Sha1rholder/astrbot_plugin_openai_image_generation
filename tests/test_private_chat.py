@@ -5,8 +5,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from astrbot.core.agent.run_context import ContextWrapper
-from astrbot.core.astr_agent_context import AstrAgentContext
 
 NOTICE = "Non-admin users are currently only allowed to generate images in group chats."
 
@@ -19,7 +17,7 @@ NOTICE = "Non-admin users are currently only allowed to generate images in group
 )
 @pytest.mark.parametrize("invalid_request", [False, True])
 async def test_private_chat_denies_every_tool_before_other_checks(
-    plugin, service, event, invalid_request
+    plugin, service, event, invalid_request, tool_context
 ):
     """Deny access before credentials, validation, references or quota."""
     event.is_private_chat.return_value = True
@@ -29,9 +27,6 @@ async def test_private_chat_denies_every_tool_before_other_checks(
     service.api.config["user_max_images"] = 0
     for api in service.apis.values():
         api.generate = AsyncMock()
-    context = ContextWrapper(
-        context=AstrAgentContext(context=service.context, event=event)
-    )
     for tool in service.context.add_llm_tools.call_args.args:
         arguments: dict[str, object] = {}
         if not tool.name.startswith("get_"):
@@ -40,9 +35,7 @@ async def test_private_chat_denies_every_tool_before_other_checks(
                 if invalid_request
                 else {"prompt": "cat", "description": "A cat"}
             )
-            if not invalid_request and tool.api_name == "image":
-                arguments["description"] = "cat"
-        assert await tool.call(context, **arguments) == NOTICE
+        assert await tool.call(tool_context, **arguments) == NOTICE
     assert [message async for message in plugin.image_help(event)] == [NOTICE]
     event.get_messages.assert_not_called()
     assert not service._tasks
@@ -61,7 +54,7 @@ async def test_private_chat_denies_every_tool_before_other_checks(
     ids=["enabled-private", "admin-private", "non-admin-group"],
 )
 async def test_allowed_chats_keep_existing_tool_behavior(
-    service, event, finish_turn, allow_private, is_private, is_admin
+    service, event, finish_turn, allow_private, is_private, is_admin, tool_context
 ):
     """Allow actual submission through either API regardless of preference."""
     service.api.config["allow_non_admin_private_chat"] = allow_private
@@ -69,18 +62,13 @@ async def test_allowed_chats_keep_existing_tool_behavior(
     event.is_admin.return_value = is_admin
     if is_private:
         event.unified_msg_origin = "webchat:FriendMessage:test-session"
-    context = ContextWrapper(
-        context=AstrAgentContext(context=service.context, event=event)
-    )
     for api in service.apis.values():
         api.generate = AsyncMock(return_value=[])
     for tool in service.context.add_llm_tools.call_args.args:
         arguments: dict[str, object] = {}
         if not tool.name.startswith("get_"):
             arguments = {"prompt": "cat", "description": "A cat"}
-            if tool.api_name == "image":
-                arguments["description"] = "cat"
-        result = await tool.call(context, **arguments)
+        result = await tool.call(tool_context, **arguments)
         if tool.name.startswith("get_"):
             assert service.instructions_tool.guide in result
         else:

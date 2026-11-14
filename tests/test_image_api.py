@@ -1,7 +1,6 @@
 """Test the Image API contract and persistence."""
 
 import base64
-import io
 import json
 from pathlib import Path
 
@@ -17,7 +16,6 @@ from data.plugins.astrbot_plugin_openai_image_generation.src.image_api import (
     INPUT_SCHEMA,
     ImageAPI,
 )
-from PIL import Image
 
 ARGUMENTS = {"description": "A cat", "prompt": "cat"}
 
@@ -54,8 +52,8 @@ def test_size_boundaries(api, size):
         {"model": "gpt-image-1"},
         {"number_of_images": 0},
         {"number_of_images": 6},
-        {"prompt": "cat", "reference_images": [0, 0], "description": "A cat"},
-        {"prompt": "cat", "reference_images": ["/etc/passwd"], "description": "A cat"},
+        {"reference_images": [0, 0]},
+        {"reference_images": ["/etc/passwd"]},
         {"stream": True},
         {"api": "chat"},
         {"llm": "gpt-6-astra"},
@@ -83,7 +81,7 @@ def test_schema_rejects_unsupported_arguments(api, options):
         ({"size": "512x512"}, "pixel count"),
         ({"size": "3840x3840"}, "pixel count"),
         ({"description": "   "}, "description must not be blank"),
-        ({"prompt": "   ", "description": "A cat"}, "prompt must not be blank"),
+        ({"prompt": "   "}, "prompt must not be blank"),
     ],
 )
 def test_invalid_values(api, options, reason):
@@ -102,7 +100,9 @@ def test_null_options_use_defaults(api):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_reference", [False, True])
-async def test_api_contract_and_original_bytes(api, tmp_path, webp, with_reference):
+async def test_api_contract_and_original_bytes(
+    api, tmp_path, webp, with_reference, mock_http
+):
     encoded = base64.b64encode(webp).decode()
     requests = []
 
@@ -110,10 +110,7 @@ async def test_api_contract_and_original_bytes(api, tmp_path, webp, with_referen
         requests.append(request)
         return httpx.Response(200, json={"data": [{"b64_json": encoded}] * 2})
 
-    api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/",
-        transport=httpx.MockTransport(respond),
-    )
+    mock_http(api, respond)
     arguments = {
         "description": "A cat",
         "prompt": "  cat  ",
@@ -163,7 +160,7 @@ async def test_api_contract_and_original_bytes(api, tmp_path, webp, with_referen
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [302, 429, 500])
-async def test_errors_do_not_leak_response_or_retry(api, tmp_path, status):
+async def test_errors_do_not_leak_response_or_retry(api, tmp_path, status, mock_http):
     attempts = []
 
     def respond(request):
@@ -174,10 +171,7 @@ async def test_errors_do_not_leak_response_or_retry(api, tmp_path, status):
             headers={"location": "https://elsewhere.invalid"},
         )
 
-    api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/",
-        transport=httpx.MockTransport(respond),
-    )
+    mock_http(api, respond)
     payload, _ = api.prepare(ARGUMENTS)
     with pytest.raises(ImageGenerationError) as error:
         await api.generate(payload, [], tmp_path, ARGUMENTS)
@@ -216,10 +210,8 @@ def test_invalid_second_image_preserves_archive_without_partial_output(
     assert {path.name for path in directory.iterdir()} == {"request.yaml"}
 
 
-def test_non_webp_output_is_rejected(tmp_path):
-    output = io.BytesIO()
-    Image.new("RGB", (16, 16)).save(output, "PNG")
-    encoded = base64.b64encode(output.getvalue()).decode()
+def test_non_webp_output_is_rejected(tmp_path, image_bytes):
+    encoded = base64.b64encode(image_bytes("PNG")).decode()
     with pytest.raises(ImageGenerationError):
         ImageAPI.save_images(
             {"data": [{"b64_json": encoded}]},
@@ -425,7 +417,7 @@ def test_capacity_cleanup_order_and_boundary(tmp_path, limit, remaining):
 
 @pytest.mark.asyncio
 async def test_cleanup_precedes_http_and_keeps_current_and_queued(
-    api, tmp_path, monkeypatch
+    api, tmp_path, monkeypatch, mock_http
 ):
     arguments = ARGUMENTS
     output = tmp_path / "images"
@@ -445,10 +437,7 @@ async def test_cleanup_precedes_http_and_keeps_current_and_queued(
         calls.append(request)
         return httpx.Response(500)
 
-    api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/",
-        transport=httpx.MockTransport(respond),
-    )
+    mock_http(api, respond)
     payload, _ = api.prepare(arguments)
     with pytest.raises(ImageGenerationError, match="HTTP 500"):
         await api.generate(payload, [], output, arguments, current)

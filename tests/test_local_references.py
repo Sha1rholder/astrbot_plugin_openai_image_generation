@@ -15,12 +15,12 @@ from data.plugins.astrbot_plugin_openai_image_generation.src.generate import (
     MAX_REFERENCE_BASE64_LENGTH,
     REQUEST_SCHEMA,
 )
-from PIL import Image as PILImage
+
+pytestmark = pytest.mark.asyncio
 
 ARGUMENTS = {"prompt": "Use the reference images", "description": "Edited image"}
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("api_name", ["image", "responses"])
 @pytest.mark.parametrize(
     "suffix,format_name,mime",
@@ -34,12 +34,22 @@ ARGUMENTS = {"prompt": "Use the reference images", "description": "Edited image"
     ],
 )
 async def test_mixed_references_reach_api_in_order(
-    service, event, tmp_path, webp, finish_turn, api_name, suffix, format_name, mime
+    service,
+    event,
+    tmp_path,
+    webp,
+    finish_turn,
+    api_name,
+    suffix,
+    format_name,
+    mime,
+    mock_http,
+    image_bytes,
 ):
     """Upload file bytes in selection order and preserve paths in the archive."""
     path = tmp_path / f"参考 配色{suffix}"
-    PILImage.new("RGB", (16, 16), "red").save(path, format_name)
-    raw = path.read_bytes()
+    raw = image_bytes(format_name, color="red")
+    path.write_bytes(raw)
     event.get_messages.return_value = [Image.fromBytes(webp)]
     encoded = base64.b64encode(webp).decode()
     expected_urls = [
@@ -68,9 +78,7 @@ async def test_mixed_references_reach_api_in_order(
         return httpx.Response(200, json={"data": [{"b64_json": encoded}]})
 
     api = service.apis[api_name]
-    api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(respond)
-    )
+    mock_http(api, respond)
     arguments = {**ARGUMENTS, "reference_images": [str(path), 0]}
     result = await service.generate(event, arguments, api_name)
     assert "request body was sent successfully" in result
@@ -82,7 +90,6 @@ async def test_mixed_references_reach_api_in_order(
     service.context.send_message.assert_awaited_once()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("api_name", ["image", "responses"])
 @pytest.mark.parametrize(
     "kind",
@@ -98,7 +105,7 @@ async def test_mixed_references_reach_api_in_order(
     ],
 )
 async def test_invalid_local_reference_never_submits(
-    service, event, tmp_path, webp, monkeypatch, api_name, kind
+    service, event, tmp_path, webp, monkeypatch, api_name, kind, mock_http, image_bytes
 ):
     """Reject invalid sources before HTTP submission without exposing host errors."""
     path = tmp_path / "reference.png"
@@ -112,7 +119,7 @@ async def test_invalid_local_reference_never_submits(
     elif kind == "corrupt":
         path.write_bytes(b"not an image")
     elif kind == "gif":
-        PILImage.new("RGB", (16, 16)).save(path, "GIF")
+        path.write_bytes(image_bytes("GIF"))
     elif kind == "large":
         with path.open("wb") as source:
             source.truncate(MAX_REFERENCE_BASE64_LENGTH // 4 * 3 + 1)
@@ -129,9 +136,7 @@ async def test_invalid_local_reference_never_submits(
 
     handler = Mock(side_effect=AssertionError("Unexpected API request"))
     api = service.apis[api_name]
-    api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(handler)
-    )
+    mock_http(api, handler)
     result = await service.generate(
         event, {**ARGUMENTS, "reference_images": [value]}, api_name
     )
@@ -144,9 +149,8 @@ async def test_invalid_local_reference_never_submits(
     service.context.send_message.assert_not_awaited()
 
 
-@pytest.mark.asyncio
 async def test_queued_local_reference_survives_source_removal(
-    service, event, tmp_path, webp, monkeypatch, finish_turn
+    service, event, tmp_path, webp, monkeypatch, finish_turn, mock_http
 ):
     """Use the admission snapshot even if an older archive is deleted while queued."""
     path = tmp_path / "archived.webp"
@@ -173,9 +177,7 @@ async def test_queued_local_reference_survives_source_removal(
             200, json={"output": [{"type": "image_generation_call", "result": encoded}]}
         )
 
-    service.api.client = httpx.AsyncClient(
-        base_url="https://example.invalid/v1/", transport=httpx.MockTransport(respond)
-    )
+    mock_http(service.api, respond)
     async with service._generation_lock:
         task = asyncio.create_task(
             service.generate(event, {**ARGUMENTS, "reference_images": [str(path)]})
