@@ -1,8 +1,8 @@
 {
   "metadata": {
     "display_name": "OpenAI图像生成",
-    "short_desc": "生成WebP，可开启提示词自动优化",
-    "desc": "支持文生图和参考图生图，可选择仅Responses API、优先Responses API、仅Image API或优先Image API。Responses API会通过LLM优化提示词。两种接口都支持gpt-image-2.6-sunburst和gpt-image-2.6-flare"
+    "short_desc": "使用gpt-image-2.6生成WebP图像",
+    "desc": "使用OPENAI_API_KEY和gpt-image-2.6生成图像，支持文生图和图像编辑\n\n插件默认使用Responses API，也支持Image API。用户可以指示agent使用偏好的API\n\nResponses API启用了OpenAI内置联网搜索工具，可在需要时自动搜索参考图"
   },
   "config": {
     "api_key": {
@@ -15,15 +15,11 @@
     },
     "proxy": {
       "description": "OpenAI API代理",
-      "hint": "可选HTTP(S)、SOCKS5或SOCKS5h代理地址，例如http://127.0.0.1:7890或socks5h://user:password@127.0.0.1:1080。填写后覆盖环境变量代理，留空保留环境变量代理行为。两种SOCKS协议均由代理端解析目标域名。用于生图和编辑API请求，修改后请重载插件"
-    },
-    "api_mode": {
-      "description": "生图API模式",
-      "hint": "可选择仅Responses API、优先Responses API、仅Image API或优先Image API。仅使用模式会拒绝另一接口的工具调用并引导至允许的工具；优先模式允许两种接口，由提示词引导优先选择。Responses API会使用LLM优化提示词并消耗额外tokens。修改后请重载插件"
+      "hint": "可选HTTP(S)、SOCKS5或SOCKS5h代理地址，例如`http://127.0.0.1:7890`或`socks5h://user:password@127.0.0.1:1080`。填写后覆盖环境变量代理，留空保留环境变量代理行为。两种SOCKS协议均由代理端解析目标域名。用于生图和编辑API请求，修改后请重载插件"
     },
     "responses_api_default_llm": {
       "description": "提示词优化默认LLM",
-      "hint": "启用Responses API时生效，agent可在请求中覆盖此设置。修改后请重载插件"
+      "hint": "Responses API请求的默认模型"
     },
     "timeout_seconds": {
       "description": "API请求超时时间（秒）",

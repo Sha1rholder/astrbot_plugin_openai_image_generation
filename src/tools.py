@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import FunctionTool
@@ -18,12 +19,11 @@ INSTRUCTIONS_TOOL_DESCRIPTION = "Check API key configuration, then read image ge
 
 
 class InstructionsTool(FunctionTool[AstrAgentContext]):
-    """Provide shared behavior for API-specific instruction tools."""
+    """Provide the shared guide for both image generation APIs."""
 
-    def __init__(self, service: ImageService, api_name: str) -> None:
-        api = service.apis[api_name]
+    def __init__(self, service: ImageService) -> None:
         super().__init__(
-            name=api.instructions_tool_name,
+            name="get_openai_image_generate_webp_instructions",
             description=INSTRUCTIONS_TOOL_DESCRIPTION,
             parameters={
                 "type": "object",
@@ -32,17 +32,18 @@ class InstructionsTool(FunctionTool[AstrAgentContext]):
             },
         )
         self.service = service
-        self.api_name = api_name
-        self.guide = api.guide
+        self.guide = (
+            Path(__file__).with_name("instructions.md").read_text(encoding="utf-8")
+        )
 
     def instructions(self, event: AstrMessageEvent) -> str:
         """Check credentials and append the archive path and reference indices."""
         try:
-            self.service.apis[self.api_name].require_api_key()
+            self.service.api.require_api_key()
         except ImageGenerationError as exc:
             return str(exc)
         images = self.service.reference_images(event)
-        available = ", ".join(str(i) for i in range(1, len(images) + 1)) or "none"
+        available = ", ".join(str(i) for i in range(len(images))) or "none"
         return (
             f"{self.guide}\n\nImage archive directory on the AstrBot host: {self.service.output_dir.resolve()}"
             f"\nAvailable reference image indices for this message: {available}"
@@ -51,8 +52,8 @@ class InstructionsTool(FunctionTool[AstrAgentContext]):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **_kwargs: Any
     ) -> str:
-        """Return instructions after the service enforces the configured API mode."""
-        return self.service.instructions(context.context.event, self.api_name)
+        """Return instructions after the service checks access."""
+        return self.service.instructions(context.context.event)
 
 
 class GenerateWebpTool(FunctionTool[AstrAgentContext]):
@@ -78,4 +79,10 @@ class GenerateWebpTool(FunctionTool[AstrAgentContext]):
         self, context: ContextWrapper[AstrAgentContext], **kwargs: Any
     ) -> str:
         """Forward model arguments and the current event to the image generation handler."""
-        return await self.service.generate(context.context.event, kwargs, self.api_name)
+        session = context.context.agent_session
+        return await self.service.generate(
+            context.context.event,
+            kwargs,
+            self.api_name,
+            agent_session_id=session.session_id if session is not None else None,
+        )

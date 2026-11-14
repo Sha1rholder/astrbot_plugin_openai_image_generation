@@ -1,4 +1,4 @@
-"""Verify API preferences, restricted calls, and shared cross-API accounting."""
+"""Verify API preferences and shared cross-API accounting."""
 
 import asyncio
 import base64
@@ -13,32 +13,16 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-MODES = [
-    "Responses API only",
-    "Prefer Responses API",
-    "Image API only",
-    "Prefer Image API",
-]
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "plugin", [{"api_mode": mode} for mode in MODES], indirect=True
+    "plugin",
+    [{}, {"prefer_responses_api": True}, {"prefer_responses_api": False}],
+    indirect=True,
 )
-async def test_modes_hint_guides_and_restricted_calls(plugin, service, event):
-    """Check all four modes through the registered tools before any API work."""
-    mode = service.api.config["api_mode"]
-    primary = "responses" if "Responses" in mode else "image"
-    secondary = "image" if primary == "responses" else "responses"
-    instructions = f"get_openai_image_generate_webp_instructions_{primary}_api"
-    generation = f"openai_image_generate_webp_{primary}_api"
-    expected_hint = f"Use {instructions} to get instructions for {generation}."
-    if mode.startswith("Prefer "):
-        expected_hint = (
-            f"Prefer using {instructions} to get instructions for {generation}; "
-            f"you may also use get_openai_image_generate_webp_instructions_{secondary}_api "
-            f"to get instructions for openai_image_generate_webp_{secondary}_api."
-        )
+async def test_preference_hint_and_both_guides(plugin, service, event):
+    """Always prefer Responses API, including with obsolete configuration values."""
+    expected_hint = (Path(__file__).parents[1] / "src/injection.md").read_text().strip()
     request = ProviderRequest(system_prompt="Original persona", func_tool=None)
     await plugin.add_image_hint(event, request)
     await plugin.add_image_hint(event, request)
@@ -47,26 +31,19 @@ async def test_modes_hint_guides_and_restricted_calls(plugin, service, event):
         context=AstrAgentContext(context=service.context, event=event)
     )
     tools = service.context.add_llm_tools.call_args.args
+    assert tools[0].name == "get_openai_image_generate_webp_instructions"
+    assert tools[1].api_name == "responses"
     for api in service.apis.values():
         api.generate = AsyncMock()
     for tool in tools:
         if tool.name.startswith("get_"):
             result = await tool.call(context)
-            if mode.endswith(" only") and tool.api_name == secondary:
-                assert "disabled" in result
-                assert instructions in result
-                assert generation in result
-            else:
-                assert service.instruction_tools[tool.api_name].guide in result
-                assert f"`openai_image_generate_webp_{tool.api_name}_api`" in result
-        elif mode.endswith(" only") and tool.api_name == secondary:
-            # Restriction must win over argument validation and missing credentials.
-            service.api.config["api_key"] = ""
-            result = await tool.call(context, unsupported_argument=True)
-            assert "disabled" in result
-            assert instructions in result
-            assert generation in result
-            assert "No image task was queued" in result
+            assert service.instructions_tool.guide in result
+            assert (
+                "openai_image_generate_webp_responses_api (Use this by default)"
+                in result
+            )
+            assert "openai_image_generate_webp_image_api" in result
     assert not service._tasks
     assert not service.output_dir.exists()
     assert not service.requests_dir.exists()
@@ -75,15 +52,8 @@ async def test_modes_hint_guides_and_restricted_calls(plugin, service, event):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "plugin",
-    [{"api_mode": "Prefer Responses API"}, {"api_mode": "Prefer Image API"}],
-    indirect=True,
-)
 @pytest.mark.parametrize("quota_scope", ["user", "total"])
-async def test_preferred_modes_route_both_apis_and_share_quota(
-    plugin, service, event, webp, quota_scope
-):
+async def test_both_apis_share_quota(plugin, service, event, webp, quota_scope):
     """Queue both APIs together and verify routing, archives, delivery, and quotas."""
     service.api.config[f"{quota_scope}_max_images"] = 2
     encoded = base64.b64encode(webp).decode()
@@ -118,14 +88,17 @@ async def test_preferred_modes_route_both_apis_and_share_quota(
     ]
     calls = []
     for tool in tools:
-        arguments: dict[str, dict[str, str] | str] = {"prompt": {"text": "cat"}}
+        arguments: dict[str, dict[str, str] | str] = {
+            "prompt": "cat",
+            "description": "A cat",
+        }
         if tool.api_name == "image":
             arguments["description"] = "cat"
         calls.append(tool.call(context, **arguments))
     results = await asyncio.gather(*calls)
     assert all("request body was sent successfully" in result for result in results)
     for tool in tools:
-        arguments = {"prompt": {"text": "cat"}}
+        arguments = {"prompt": "cat", "description": "A cat"}
         if tool.api_name == "image":
             arguments["description"] = "cat"
         assert "2/2 images used" in await tool.call(context, **arguments)
@@ -151,9 +124,10 @@ async def test_preferred_modes_route_both_apis_and_share_quota(
     assert all(client.is_closed for client in clients)
 
 
-def test_config_schema_exposes_four_modes():
-    """Keep the UI enum and default consistent with the supported API modes."""
+def test_config_schema_omits_api_preference():
+    """Do not expose API preference or search as user configuration."""
     schema = json.loads((Path(__file__).parents[1] / "_conf_schema.json").read_text())
-    assert schema["api_mode"]["options"] == MODES
-    assert schema["api_mode"]["default"] == "Responses API only"
+    assert "prefer_responses_api" not in schema
+    assert "api_mode" not in schema
+    assert "responses_api_web_search" not in schema
     assert "responses_api" not in schema

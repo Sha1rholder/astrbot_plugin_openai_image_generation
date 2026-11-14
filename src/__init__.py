@@ -11,8 +11,8 @@ from .generate import (
     GeneratedImages,
     ImageGenerationError,
 )
-from .image_api.generate import ImageAPI
-from .responses_api.generate import ResponsesAPI
+from .image_api import ImageAPI
+from .responses_api import ResponsesAPI
 from .tools import GenerateWebpTool, InstructionsTool
 
 if TYPE_CHECKING:
@@ -39,9 +39,9 @@ def create_apis(config: Mapping[str, Any], plugin_dir: Path) -> dict[str, BaseIm
 
 def create_tools(
     service: ImageService,
-) -> tuple[dict[str, InstructionsTool], dict[str, GenerateWebpTool]]:
-    """Create each backend's instruction and generation tools for its owning service."""
+) -> tuple[InstructionsTool, dict[str, GenerateWebpTool]]:
+    """Create the shared instructions tool and both backend generation tools."""
     return (
-        {name: InstructionsTool(service, name) for name in service.apis},
+        InstructionsTool(service),
         {name: GenerateWebpTool(service, name) for name in service.apis},
     )

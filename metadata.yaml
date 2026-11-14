@@ -1,11 +1,13 @@
 name: astrbot_plugin_openai_image_generation
 display_name: OpenAI Image Generation
-short_desc: Generate images with OPENAI_API_KEY.
+short_desc: Generate WebP images with gpt-image-2.6.
 desc: |
-  Generate images from text and reference images. Users can enable automatic prompt optimization through the Responses API or use the Image API directly. Supports gpt-image-2.6.
+  Generate images with OPENAI_API_KEY and gpt-image-2.6. Supports text-to-image and image edits.
 
-  Requires an OPENAI_API_KEY.
-version: v0.2.3
+  The plugin uses Responses API by default, but also allows Image API. You can instruct agent to use the prefered API.
+
+  OpenAI's built-in web search tool is enabled in Responses API so it can automaticly search for reference images in case it needs.
+version: v0.3.0
 author: Sha1rholder
 repo: https://github.com/Sha1rholder/astrbot_plugin_openai_image_generation
 astrbot_version: ">=4.29.4"

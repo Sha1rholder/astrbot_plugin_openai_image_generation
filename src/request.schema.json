@@ -11,73 +11,81 @@
       "description": "Plugin version read from the version field of metadata.yaml when this request was made."
     },
     "request": {
+      "type": "object"
+    },
+    "user_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Original message sender ID obtained automatically from AstrBot event.get_sender_id(), never supplied by the model. Absent in older archives or direct API calls without an event."
+    },
+    "response_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S+$",
+      "description": "Responses API response ID returned after successful image generation. Pass it as request.previous_response_id on a later request to continue this image conversation. Absent in older archives and when the provider does not return a usable ID."
+    },
+    "api": {
+      "type": "string",
+      "enum": [
+        "image",
+        "responses"
+      ],
+      "description": "API selected by the generation tool call. Absent in older archives, which used the Image API."
+    }
+  },
+  "required": [
+    "plugin_version",
+    "request"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "api": {
+            "const": "responses"
+          }
+        },
+        "required": [
+          "api"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "response_id"
+          ]
+        },
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/image_request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/responses_request"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "shared_request": {
       "type": "object",
       "properties": {
         "prompt": {
-          "type": "object",
-          "description": "Full generation prompt and optional reference indices for the original chat message. Reference image bytes are not archived; indices alone cannot reconstruct attachments.",
-          "properties": {
-            "text": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 32000
-            },
-            "images": {
-              "type": "array",
-              "description": "One-based reference image indices from the instructions tool. Omit for text-only generation.",
-              "items": {
-                "type": "integer",
-                "minimum": 1
-              },
-              "maxItems": 16,
-              "uniqueItems": true
-            }
-          },
-          "required": [
-            "text"
-          ],
-          "additionalProperties": false
+          "type": "string",
+          "description": "Full generation or edit prompt.",
+          "minLength": 1,
+          "maxLength": 32000
         },
         "description": {
           "type": "string",
-          "description": "Image API only: short description sent with the generated images. Responses API uses the returned assistant text instead.",
+          "description": "Short description automatically sent to the user with the generated images. Does not affect generation.",
           "minLength": 1,
           "maxLength": 1000
-        },
-        "llm": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "enum": [
-            "astra",
-            "sol",
-            "terra",
-            "luna",
-            null
-          ],
-          "description": "Optional Responses API LLM override. Choose astra, sol, terra or luna. Omitted or null uses the configured default."
-        },
-        "previous_response_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "minLength": 1,
-          "pattern": "^\\S+$",
-          "description": "Responses API only: response_id from a successful earlier request archive to continue editing its images. Use the response ID, not an image call ID or local request number. Omitted or null starts an independent request."
-        },
-        "model": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "enum": [
-            "sunburst",
-            "flare",
-            null
-          ],
-          "description": "Image model alias for either API. Omitted or null selects sunburst; the plugin maps the alias to gpt-image-2.6-{alias}."
         },
         "size": {
           "type": [
@@ -129,6 +137,30 @@
           ],
           "description": "Background transparency. Omitted or null selects auto."
         },
+        "reference_images": {
+          "type": "array",
+          "description": "Zero-based attachment indices from the instructions tool, current message images first, then quoted images. Select in prompt order. Omit for text-only generation. Attachment bytes are not archived.",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "prompt",
+        "description"
+      ],
+      "description": "The original JSON arguments supplied by the LLM to openai_image_generate_webp, before defaults, prompt trimming, model name expansion or API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
+    },
+    "image_request": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/shared_request"
+        }
+      ],
+      "properties": {
         "number_of_images": {
           "type": [
             "integer",
@@ -136,82 +168,34 @@
           ],
           "minimum": 1,
           "maximum": 5,
-          "description": "Requested number of images, from 1 to 5. Omitted or null selects 1. Returned files are numbered from 0.webp within this request directory."
+          "description": "Image API only: requested number of images, from 1 to 5. Omitted or null selects 1."
         }
       },
-      "required": [
-        "prompt"
+      "unevaluatedProperties": false
+    },
+    "responses_request": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/shared_request"
+        }
       ],
-      "additionalProperties": false,
-      "description": "The original JSON arguments supplied by the LLM to openai_image_generate_webp, before defaults, prompt trimming, model name expansion or API payload construction. Omitted fields remain omitted and explicit null values are preserved. This is not the upstream OpenAI HTTP request body."
-    },
-    "user_id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Original message sender ID obtained automatically from AstrBot event.get_sender_id(), never supplied by the model. Absent in older archives or direct API calls without an event."
-    },
-    "response_id": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "^\\S+$",
-      "description": "Responses API response ID returned after successful image generation. Pass it as request.previous_response_id on a later request to continue this image conversation. Absent in older archives and when the provider does not return a usable ID."
-    },
-    "api": {
-      "type": "string",
-      "enum": [
-        "image",
-        "responses"
-      ],
-      "description": "API selected by the user configuration. Absent in older archives, which used the Image API."
-    }
-  },
-  "required": [
-    "plugin_version",
-    "request"
-  ],
-  "additionalProperties": false,
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "api": {
-            "const": "responses"
-          }
+      "properties": {
+        "previous_response_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "description": "Responses API only: response_id from a successful earlier request archive to continue editing its images. Use the response ID, not an image call ID or local request number. Omitted or null starts an independent request."
         },
-        "required": [
-          "api"
-        ]
-      },
-      "then": {
-        "properties": {
-          "request": {
-            "not": {
-              "required": [
-                "description"
-              ]
-            }
-          }
+        "web_search": {
+          "type": "boolean",
+          "default": true,
+          "description": "Responses API only: allow built-in live web search before image generation. Omitted or true lets the model search when needed. Set false to disable search for this request. When research is needed, describe what to search for in prompt."
         }
       },
-      "else": {
-        "not": {
-          "required": [
-            "response_id"
-          ]
-        },
-        "properties": {
-          "request": {
-            "required": [
-              "description"
-            ],
-            "not": {
-              "required": [
-                "previous_response_id"
-              ]
-            }
-          }
-        }
-      }
+      "unevaluatedProperties": false
     }
-  ]
+  }
 }

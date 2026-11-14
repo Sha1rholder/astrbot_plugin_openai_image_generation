@@ -12,7 +12,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-from .src import ImageGenerationError, create_apis
+from .src import create_apis
 from .src.service import ImageService
 
 PLUGIN_NAME = "astrbot_plugin_openai_image_generation"
@@ -23,24 +23,12 @@ class WebpImagePlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
-        mode = config.get("api_mode", "Responses API only")
-        modes = {
-            "Responses API only": ("responses", None),
-            "Prefer Responses API": ("responses", "image"),
-            "Image API only": ("image", None),
-            "Prefer Image API": ("image", "responses"),
-        }
-        if not isinstance(mode, str) or mode not in modes:
-            raise ImageGenerationError("api_mode must be one of: " + ", ".join(modes))
-        preferred_api, alternative_api = modes[mode]
         plugin_dir = Path(__file__).resolve().parent
         self.service = ImageService(
             context,
             create_apis(config, plugin_dir),
             StarTools.get_data_dir(PLUGIN_NAME),
             self.logger,
-            preferred_api,
-            alternative_api,
         )
 
     @filter.command("image_help")

@@ -9,17 +9,18 @@ import httpx
 import pytest
 from astrbot.api.message_components import Image
 
-ARGUMENTS = {"prompt": {"text": "cat"}}
+ARGUMENTS = {"prompt": "cat", "description": "A cat"}
 SENT = "request body was sent successfully"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plugin", [{"api_mode": "Image API only"}, {}], indirect=True)
+@pytest.mark.parametrize("api_name", ["image", "responses"])
 @pytest.mark.parametrize("status", [200, 401])
 async def test_real_http_submission_returns_before_response_headers(
-    service, event, webp, finish_turn, status
+    service, event, webp, finish_turn, status, api_name
 ):
     """Actual HTTPcore transmission releases the tool while the server is waiting."""
+    api = service.apis[api_name]
     received = asyncio.Event()
     respond = asyncio.Event()
     handled = asyncio.Event()
@@ -39,7 +40,7 @@ async def test_real_http_submission_returns_before_response_headers(
             await respond.wait()
             result = (
                 {"data": [{"b64_json": encoded}]}
-                if service.api.api_name == "image"
+                if api.api_name == "image"
                 else {"output": [{"type": "image_generation_call", "result": encoded}]}
             )
             body = json.dumps(
@@ -58,20 +59,20 @@ async def test_real_http_submission_returns_before_response_headers(
 
     server = await asyncio.start_server(server_handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    service.api.client = httpx.AsyncClient(
+    api.client = httpx.AsyncClient(
         base_url=f"http://127.0.0.1:{port}/v1/", trust_env=False
     )
     arguments = {
         **ARGUMENTS,
-        **({"description": "cat"} if service.api.api_name == "image" else {}),
+        **({"description": "cat"} if api.api_name == "image" else {}),
     }
-    call = asyncio.create_task(service.generate(event, arguments))
+    call = asyncio.create_task(service.generate(event, arguments, api_name))
     try:
         await asyncio.wait_for(received.wait(), 2)
         result = await asyncio.wait_for(asyncio.shield(call), 2)
         assert SENT in result
-        assert "Waiting for generation" in result
-        assert "will be sent automatically when ready" in result
+        assert "Image generation has started in the background" in result
+        assert "You do not need to send the images yourself" in result
         assert not (service.output_dir / "0" / "0.webp").exists()
         assert len(service._tasks) == 1
         service.context.send_message.assert_not_awaited()
@@ -160,7 +161,9 @@ async def test_invalid_reference_payload_returns_to_model(service, event):
         base_url="https://example.invalid/v1/",
         transport=httpx.MockTransport(unexpected_request),
     )
-    result = await service.generate(event, {"prompt": {"text": "cat", "images": [1]}})
+    result = await service.generate(
+        event, {"prompt": "cat", "reference_images": [0], "description": "A cat"}
+    )
     assert "References must be valid" in result
     assert SENT not in result
     assert not requests
