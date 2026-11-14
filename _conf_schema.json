@@ -49,28 +49,22 @@
     "default": false,
     "hint": "Disabled by default. When disabled, any call to this plugin's tools by a non-administrator in a private chat returns: Non-administrator users are currently only allowed to generate images in group chats. Administrator private chats and group chats continue to follow the existing rules. Reload the plugin after changes."
   },
-  "user_window_minutes": {
-    "description": "Per-user sliding window (minutes)",
+  "sliding_window": {
+    "description": "Sliding window (minutes)",
     "type": "int",
     "default": 360,
-    "hint": "Nonnegative integer. Default: 360 minutes. Set to 0 to skip the sliding-window quota check."
+    "hint": "Nonnegative integer. Shared by per-user and total quotas. Set to 0 to skip both quota checks."
   },
-  "user_max_images": {
+  "per_user_max_images": {
     "description": "Maximum images per user in the sliding window",
     "type": "int",
     "default": 3,
-    "hint": "Nonnegative integer. Default: 3 images. Counts requested images, including pending and failed jobs. A quota of 0 rejects requests through the normal quota check; the tool remains available. Ignored when the window is 0. Rejected requests are not recorded. Administrators bypass this check. Uses the latest 1000 receipts per user."
-  },
-  "total_window_minutes": {
-    "description": "Total sliding window (minutes)",
-    "type": "int",
-    "default": 360,
-    "hint": "Nonnegative integer. Set to 0 to skip the total quota check. Administrators bypass both quota checks but their usage still counts."
+    "hint": "Nonnegative integer. Counts requested images, including pending and failed jobs. A quota of 0 rejects requests through the normal quota check; the tool remains available. Ignored when the window is 0. Rejected requests are not recorded. Administrators bypass this check. Uses the latest 1000 receipts per user."
   },
   "total_max_images": {
-    "description": "Maximum images for all users in the total window",
+    "description": "Maximum images for all users in the sliding window",
     "type": "int",
     "default": 30,
-    "hint": "Nonnegative integer. Counts all accepted images, including administrator requests. Only ordinary users are restricted. Set to 0 to reject ordinary-user requests when the total window is enabled. Uses the latest 1000 total receipts."
+    "hint": "Nonnegative integer. Counts all accepted images, including administrator requests. Only ordinary users are restricted. Set to 0 to reject ordinary-user requests when the sliding window is enabled. Uses the latest 1000 total receipts."
   }
 }

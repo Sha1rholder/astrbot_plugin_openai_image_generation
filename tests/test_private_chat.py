@@ -24,7 +24,7 @@ async def test_private_chat_denies_every_tool_before_other_checks(
     event.unified_msg_origin = "webchat:FriendMessage:test-session"
     if invalid_request:
         service.api.config["api_key"] = ""
-    service.api.config["user_max_images"] = 0
+    service.api.config["per_user_max_images"] = 0
     for api in service.apis.values():
         api.generate = AsyncMock()
     for tool in service.context.add_llm_tools.call_args.args:
