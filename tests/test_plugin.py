@@ -422,7 +422,7 @@ async def test_astrbot_executor_to_http_to_delivery(
     assert generation_result is not None
     generation_content = generation_result.content[0]
     assert isinstance(generation_content, TextContent)
-    assert "request body was sent successfully" in generation_content.text
+    assert "Request sent successfully" in generation_content.text
     await finish_turn()
     assert len(requests) == 1
     body = json.loads(requests[0].content)
@@ -455,12 +455,12 @@ async def test_astrbot_executor_to_http_to_delivery(
     if api_name == "responses" and has_text:
         service.context.agent.run_turn.assert_awaited_once()
         feedback = service.context.agent.run_turn.call_args.kwargs
-        assert feedback["send_to_user"] is False
+        assert feedback["send_to_user"] is True
         assert feedback["umo"] == event.unified_msg_origin
         assert feedback["session_id"] == "original-conversation"
         assert feedback["source_event"] is event
         assert "Internal backend notes" in feedback["input_message"][0].text
-        assert "Do not send or resend images" in feedback["input_message"][0].text
+        assert "Do not resend images" in feedback["input_message"][0].text
         service.context.agent.run_turn.return_value.result.assert_awaited_once()
     else:
         service.context.agent.run_turn.assert_not_awaited()
@@ -645,7 +645,7 @@ async def test_terminate_cancels_running_and_queued_jobs_before_closing(
 async def test_failures_return_to_model_before_submission_or_deliver_afterwards(
     service, event, error, expected, finish_turn, sent
 ):
-    """Background errors reach the user without leaking exception details or retrying."""
+    """Background errors reach the agent without direct delivery or retries."""
 
     async def fail(*args, on_request_sent, **kwargs):
         if sent:
@@ -657,18 +657,18 @@ async def test_failures_return_to_model_before_submission_or_deliver_afterwards(
     await finish_turn()
     service.api.generate.assert_awaited_once()
     if sent:
-        assert "request body was sent successfully" in result
-        service.context.send_message.assert_awaited_once()
-        origin, message = service.context.send_message.call_args.args
-        assert origin == event.unified_msg_origin
-        assert "Do not automatically retry" not in message
-        service.context.llm_generate.assert_awaited_once()
-        assert expected in service.context.llm_generate.call_args.kwargs["prompt"]
-        assert "tools" not in service.context.llm_generate.call_args.kwargs
-        message = service.context.llm_generate.call_args.kwargs["prompt"]
-    else:
+        assert "Request sent successfully" in result
         service.context.send_message.assert_not_awaited()
-        assert "request body was sent successfully" not in result
+        service.context.llm_generate.assert_not_awaited()
+        service.context.agent.run_turn.assert_awaited_once()
+        feedback = service.context.agent.run_turn.call_args.kwargs
+        assert feedback["umo"] == event.unified_msg_origin
+        assert feedback["send_to_user"] is True
+        message = feedback["input_message"][0].text
+    else:
+        service.context.agent.run_turn.assert_not_awaited()
+        service.context.send_message.assert_not_awaited()
+        assert "Request sent successfully" not in result
         message = result
     assert expected in message
     assert "private" not in message
