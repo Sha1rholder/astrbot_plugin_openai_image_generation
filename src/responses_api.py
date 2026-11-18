@@ -21,8 +21,8 @@ from .generate import (
 )
 
 RESPONSES_MODELS = {
-    "astra": "gpt-6-astra",
-    "sol": "gpt-6.1-sol",
+    "astra": "gpt-6.2-astra",
+    "sol": "gpt-6.2-sol",
     "terra": "gpt-6.1-terra",
     "luna": "gpt-6-luna",
 }
@@ -43,7 +43,7 @@ class ResponsesAPI(BaseImageAPI):
     def __init__(self, config: Mapping[str, Any], plugin_dir: Path) -> None:
         super().__init__(config, plugin_dir)
         default_llm = config.get(
-            "responses_api_default_llm", config.get("responses_default_llm", "terra")
+            "responses_api_default_llm", config.get("responses_default_llm", "sol")
         )
         if not isinstance(default_llm, str) or default_llm not in RESPONSES_MODELS:
             raise ImageGenerationError(

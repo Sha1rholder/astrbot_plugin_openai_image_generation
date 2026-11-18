@@ -56,7 +56,7 @@ def test_size_boundaries(api, size):
         {"reference_images": ["/etc/passwd"]},
         {"stream": True},
         {"api": "chat"},
-        {"llm": "gpt-6-astra"},
+        {"llm": "gpt-6.2-astra"},
         {"previous_response_id": "resp_previous"},
         {"web_search": True},
         {"web_search": False},

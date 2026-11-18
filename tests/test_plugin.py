@@ -1005,7 +1005,7 @@ async def test_unload_cancels_pending_feedback_agent(service, event, tmp_path):
         {**ARGUMENTS, "reference_images": [True]},
         {**ARGUMENTS, "reference_images": list(range(17))},
         {**ARGUMENTS, "model": "sunburst"},
-        {**ARGUMENTS, "llm": "terra"},
+        {**ARGUMENTS, "llm": "sol"},
     ],
 )
 def test_both_tools_reject_undocumented_contract(service, api_name, arguments):

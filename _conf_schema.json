@@ -28,7 +28,7 @@
       "terra",
       "luna"
     ],
-    "default": "terra",
+    "default": "sol",
     "hint": "Default model for Responses API requests."
   },
   "timeout_seconds": {

@@ -21,8 +21,8 @@ ARGUMENTS = {"prompt": "cat", "description": "A cat"}
         {"number_of_images": 1},
         {"number_of_images": None},
         {"model": "sunburst"},
-        {"llm": "terra"},
-        {"llm": "gpt-6-astra"},
+        {"llm": "sol"},
+        {"llm": "gpt-6.2-astra"},
         {"previous_response_id": ""},
         {"previous_response_id": "resp previous"},
         {"previous_response_id": 123},
@@ -40,7 +40,7 @@ def test_responses_default_options(responses_api):
     payload, indices = responses_api.prepare(ARGUMENTS)
     assert indices == []
     assert payload == {
-        "model": "gpt-6.1-terra",
+        "model": "gpt-6.2-sol",
         "input": "cat",
         "instructions": "Briefly describe the image after generate successfully.",
         "tools": [
